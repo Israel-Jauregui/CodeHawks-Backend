@@ -1,0 +1,19 @@
+node_modules/
+dist/
+coverage/
+.env
+*.log
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+terraform.tfvars
+infrastructure/*.zip
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,13 @@
+# Add this as backend.tf only after the shared AWS bootstrap has created the
+# state bucket. Keeping it out of active configuration lets `terraform validate`
+# work before AWS credentials and bootstrap outputs exist.
+#
+# terraform {
+#   backend "s3" {
+#     bucket       = "REPLACE_WITH_BOOTSTRAP_STATE_BUCKET"
+#     key          = "backend/terraform.tfstate"
+#     region       = "us-east-1"
+#     encrypt      = true
+#     use_lockfile = true
+#   }
+# }

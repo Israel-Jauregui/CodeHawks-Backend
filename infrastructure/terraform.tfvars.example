@@ -1,0 +1,27 @@
+environment = "dev"
+aws_region  = "us-east-1"
+
+# Required for newsletters in either auth mode and for activation/login codes
+# in Cognito mode. The identity must be verified and SES must have production access.
+ses_identity_arn      = "arn:aws:ses:us-east-1:123456789012:identity/codehawks.org"
+email_from_address    = "CodeHawks <noreply@codehawks.org>"
+email_reply_to_address = "officers@codehawks.org"
+
+# Preferred after an ordinary non-admin UNG user successfully completes the consent probe.
+auth_provider       = "entra"
+entra_tenant_id     = "b8e6c58e-d6fa-4f4a-968c-d4be658dfe8e"
+entra_api_client_id = "00000000-0000-0000-0000-000000000000"
+
+# No-UNG-IT fallback. Comment the Entra block above, uncomment this block, and
+# verify the SES identity plus production sending access in aws_region.
+# auth_provider            = "cognito"
+
+allowed_origins = [
+  "http://localhost:5173",
+  "https://codehawks.org",
+  "https://www.codehawks.org",
+]
+
+# Optional: creates an AWS Budget and sends a confirmation email.
+# budget_notification_email = "officer@ung.edu"
+# monthly_budget_usd         = 10
