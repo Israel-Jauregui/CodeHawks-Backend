@@ -113,4 +113,20 @@ variable "budget_notification_email" {
   type        = string
   default     = null
   nullable    = true
+  sensitive   = true
+}
+
+variable "runtime_permissions_boundary_arn" {
+  description = "Permissions boundary attached to Terraform-created Lambda roles. Required in production."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.runtime_permissions_boundary_arn == null ||
+      can(regex("^arn:aws:iam::[0-9]{12}:policy/codehawks-backend-runtime-boundary$", var.runtime_permissions_boundary_arn))
+    )
+    error_message = "runtime_permissions_boundary_arn must be the CodeHawks backend runtime boundary ARN."
+  }
 }

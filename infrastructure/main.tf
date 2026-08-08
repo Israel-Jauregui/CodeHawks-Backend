@@ -32,6 +32,13 @@ check "email_configuration" {
   }
 }
 
+check "production_permissions_boundary" {
+  assert {
+    condition     = var.environment != "production" || var.runtime_permissions_boundary_arn != null
+    error_message = "runtime_permissions_boundary_arn is required in production."
+  }
+}
+
 locals {
   configured_email_from = coalesce(var.email_from_address, "not-configured@example.invalid")
   configured_ses_identity_arn = coalesce(
@@ -331,8 +338,9 @@ data "aws_iam_policy_document" "lambda_assume_role" {
 }
 
 resource "aws_iam_role" "api" {
-  name               = "${local.resource_prefix}-api"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+  name                 = "${local.resource_prefix}-api"
+  assume_role_policy   = data.aws_iam_policy_document.lambda_assume_role.json
+  permissions_boundary = var.runtime_permissions_boundary_arn
 }
 
 data "aws_iam_policy_document" "api" {
@@ -344,7 +352,6 @@ data "aws_iam_policy_document" "api" {
       "dynamodb:GetItem",
       "dynamodb:PutItem",
       "dynamodb:Query",
-      "dynamodb:TransactWriteItems",
       "dynamodb:UpdateItem",
     ]
     resources = [
@@ -391,8 +398,9 @@ resource "aws_cloudwatch_log_group" "api" {
 }
 
 resource "aws_iam_role" "newsletter_worker" {
-  name               = "${local.resource_prefix}-newsletter-worker"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+  name                 = "${local.resource_prefix}-newsletter-worker"
+  assume_role_policy   = data.aws_iam_policy_document.lambda_assume_role.json
+  permissions_boundary = var.runtime_permissions_boundary_arn
 }
 
 data "aws_iam_policy_document" "newsletter_worker" {
@@ -402,7 +410,6 @@ data "aws_iam_policy_document" "newsletter_worker" {
       "dynamodb:GetItem",
       "dynamodb:PutItem",
       "dynamodb:Query",
-      "dynamodb:TransactWriteItems",
       "dynamodb:UpdateItem",
     ]
     resources = [
@@ -508,8 +515,9 @@ resource "aws_cloudwatch_metric_alarm" "newsletter_dlq" {
 resource "aws_iam_role" "cognito_trigger" {
   count = var.auth_provider == "cognito" ? 1 : 0
 
-  name               = "${local.resource_prefix}-cognito-trigger"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+  name                 = "${local.resource_prefix}-cognito-trigger"
+  assume_role_policy   = data.aws_iam_policy_document.lambda_assume_role.json
+  permissions_boundary = var.runtime_permissions_boundary_arn
 }
 
 data "aws_iam_policy_document" "cognito_trigger" {

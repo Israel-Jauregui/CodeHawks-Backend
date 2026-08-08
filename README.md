@@ -2,7 +2,7 @@
 
 AWS-native backend for the CodeHawks / UNG App Development Club website. This is a clean serverless replacement for the unfinished Linux/PostgreSQL backend: the old project informed the domain, but its authentication and implementation details were not copied.
 
-The repository is ready for local verification and an AWS plan. It has **not** been deployed; AWS credentials, a Terraform state backend, the frontend origins, and the final authentication choice are still required.
+The repository is ready for local verification and the protected AWS bootstrap/plan/apply process. It has **not** been deployed; the intended AWS account/region, SES identity, frontend origins, and final authentication choice must still be confirmed.
 
 ## Authentication without depending on UNG IT
 
@@ -83,15 +83,14 @@ terraform -chdir=infrastructure validate
 
 1. Decide between Entra and Cognito using [docs/authentication.md](docs/authentication.md). Probe Entra consent before committing the frontend to Microsoft sign-in.
 2. Verify the club's SES sender identity/DKIM and request production sending access; see [docs/email.md](docs/email.md).
-3. Create `infrastructure/backend.tf` from `backend.tf.example` after the Terraform state bucket is known.
-4. Copy `infrastructure/terraform.tfvars.example` to `infrastructure/terraform.tfvars`, select the auth block, and set exact frontend origins/email values.
-5. Run `npm ci && npm run check`.
-6. Authenticate to the intended AWS account and verify it with `aws sts get-caller-identity`.
-7. Run `terraform -chdir=infrastructure plan -out=backend.tfplan`; review account, region, resources, and budget before applying.
-8. Apply the reviewed plan, sign in once as the intended first President, then use the one-time bootstrap command in [docs/bootstrap.md](docs/bootstrap.md).
-9. Connect the frontend using [docs/frontend-integration.md](docs/frontend-integration.md).
+3. Follow the [infrastructure runbook](infrastructure/README.md) to create the manual CloudFormation bootstrap in the confirmed AWS account and region.
+4. Configure the main-only GitHub plan environment and owner-approved apply environment from the bootstrap outputs.
+5. Run the manual workflow with `operation=plan`, and review the full plan without changing AWS.
+6. Rerun with `operation=plan-and-apply`, review the fresh plan, and approve the waiting apply environment only when it is correct.
+7. Sign in once as the intended first President, then use the one-time bootstrap command in [docs/bootstrap.md](docs/bootstrap.md).
+8. Connect the frontend using [docs/frontend-integration.md](docs/frontend-integration.md).
 
-Do not commit AWS keys, state files, tokens, `terraform.tfvars`, or Entra secrets. The browser flows use public clients and do not need an application client secret.
+Do not commit AWS keys, state files, plan files, tokens, `terraform.tfvars`, or Entra secrets. GitHub uses short-lived OIDC sessions, and the browser flows use public clients without an application client secret.
 
 ## Repository layout
 

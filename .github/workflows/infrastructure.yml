@@ -1,0 +1,279 @@
+name: Plan or apply backend infrastructure
+run-name: ${{ inputs.operation }} backend production at ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Stop after the plan, or wait for approval and apply that exact plan
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - plan-and-apply
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: backend-production-infrastructure
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan production infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: backend-plan-production
+    outputs:
+      bundle_sha256: ${{ steps.preserve-plan.outputs.bundle_sha256 }}
+      plan_key: ${{ steps.preserve-plan.outputs.plan_key }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_environment: production
+      TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+      TF_VAR_auth_provider: ${{ vars.AUTH_PROVIDER }}
+      TF_VAR_entra_api_client_id: ${{ vars.ENTRA_API_CLIENT_ID }}
+      TF_VAR_ses_identity_arn: ${{ vars.SES_IDENTITY_ARN }}
+      TF_VAR_email_from_address: ${{ vars.EMAIL_FROM_ADDRESS }}
+      TF_VAR_email_reply_to_address: ${{ vars.EMAIL_REPLY_TO_ADDRESS }}
+      TF_VAR_allowed_origins: ${{ vars.ALLOWED_ORIGINS }}
+      TF_VAR_runtime_permissions_boundary_arn: ${{ vars.RUNTIME_PERMISSIONS_BOUNDARY_ARN }}
+
+    steps:
+      - name: Check out approved revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          cache: npm
+          node-version: 24
+
+      - name: Install dependencies and build Lambda packages
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.15.8"
+
+      - name: Validate deployment configuration
+        working-directory: infrastructure
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_PLAN_ROLE_ARN: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          set -euo pipefail
+
+          required_values=(
+            AWS_ACCOUNT_ID
+            AWS_PLAN_ROLE_ARN
+            AWS_REGION
+            TF_STATE_BUCKET
+            TF_VAR_auth_provider
+            TF_VAR_ses_identity_arn
+            TF_VAR_email_from_address
+            TF_VAR_allowed_origins
+            TF_VAR_runtime_permissions_boundary_arn
+          )
+
+          for name in "${required_values[@]}"; do
+            [[ -n "${!name:-}" ]] || {
+              echo "Missing required backend-plan-production value: ${name}" >&2
+              exit 1
+            }
+          done
+
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
+          [[ "$AWS_PLAN_ROLE_ARN" == "arn:aws:iam::${AWS_ACCOUNT_ID}:role/codehawks-backend-terraform-plan" ]]
+          [[ "$TF_STATE_BUCKET" == "codehawks-backend-terraform-state-${AWS_ACCOUNT_ID}" ]]
+          [[ "$TF_VAR_ses_identity_arn" == "arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT_ID}:identity/"* ]]
+          [[ "$TF_VAR_runtime_permissions_boundary_arn" == "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/codehawks-backend-runtime-boundary" ]]
+          [[ "$TF_VAR_auth_provider" == "entra" || "$TF_VAR_auth_provider" == "cognito" ]]
+          jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and startswith("https://"))' \
+            <<<"$TF_VAR_allowed_origins" >/dev/null
+
+          if [[ "$TF_VAR_auth_provider" == "entra" ]]; then
+            [[ "$TF_VAR_entra_api_client_id" =~ ^[0-9a-fA-F-]{36}$ ]]
+          fi
+
+      - name: Load optional budget notification
+        env:
+          BUDGET_NOTIFICATION_EMAIL: ${{ secrets.BUDGET_NOTIFICATION_EMAIL }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$BUDGET_NOTIFICATION_EMAIL" ]]; then
+            [[ "$BUDGET_NOTIFICATION_EMAIL" != *$'\n'* ]]
+            printf 'TF_VAR_budget_notification_email=%s\n' "$BUDGET_NOTIFICATION_EMAIL" >> "$GITHUB_ENV"
+          fi
+
+      - name: Get short-lived planning credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: codehawks-backend-plan-${{ github.run_id }}
+
+      - name: Verify AWS target
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          actual_account_id="$(aws sts get-caller-identity --query Account --output text)"
+          [[ "$actual_account_id" == "$EXPECTED_ACCOUNT_ID" ]]
+          [[ "$AWS_REGION" == "$TF_VAR_aws_region" ]]
+
+      - name: Initialize remote state
+        working-directory: infrastructure
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=backend/production.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Create reviewable plan
+        working-directory: infrastructure
+        run: |
+          set -euo pipefail
+          terraform fmt -check -recursive
+          terraform validate
+          terraform plan -input=false -lock-timeout=5m -out=production.tfplan
+          terraform show -no-color production.tfplan > backend-plan.txt
+
+          {
+            echo '### Backend production Terraform plan'
+            echo
+            echo 'Review this output before approving the apply environment.'
+            echo
+            echo '```text'
+            cat backend-plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve the exact reviewed plan privately
+        id: preserve-plan
+        working-directory: infrastructure
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          set -euo pipefail
+          readonly bundle=production-plan-bundle.tar.gz
+          readonly plan_key="backend/plans/${GITHUB_RUN_ID}/${bundle}"
+
+          tar -czf "$bundle" \
+            production.tfplan \
+            backend-plan.txt \
+            lambda.zip \
+            cognito-trigger.zip \
+            newsletter-worker.zip
+
+          bundle_sha256="$(sha256sum "$bundle" | awk '{print $1}')"
+          aws s3 cp "$bundle" "s3://${TF_STATE_BUCKET}/${plan_key}" \
+            --only-show-errors
+
+          echo "bundle_sha256=${bundle_sha256}" >> "$GITHUB_OUTPUT"
+          echo "plan_key=${plan_key}" >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo "Private plan bundle SHA-256: \`${bundle_sha256}\`"
+            echo "The bundle expires from the private state bucket after two days."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply reviewed production plan
+    if: ${{ needs.plan.result == 'success' && inputs.operation == 'plan-and-apply' }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: backend-infrastructure-production
+    defaults:
+      run:
+        shell: bash
+        working-directory: infrastructure
+    env:
+      TF_IN_AUTOMATION: "true"
+
+    steps:
+      - name: Check out the planned revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.15.8"
+
+      - name: Validate apply target
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_APPLY_ROLE_ARN: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
+          [[ "$AWS_APPLY_ROLE_ARN" == "arn:aws:iam::${AWS_ACCOUNT_ID}:role/codehawks-backend-terraform-apply" ]]
+          [[ "$TF_STATE_BUCKET" == "codehawks-backend-terraform-state-${AWS_ACCOUNT_ID}" ]]
+
+      - name: Get short-lived apply credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: codehawks-backend-apply-${{ github.run_id }}
+
+      - name: Initialize the same remote state
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=backend/production.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Download and verify the private reviewed plan
+        env:
+          BUNDLE_SHA256: ${{ needs.plan.outputs.bundle_sha256 }}
+          PLAN_KEY: ${{ needs.plan.outputs.plan_key }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          set -euo pipefail
+          readonly bundle=production-plan-bundle.tar.gz
+          [[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$PLAN_KEY" == "backend/plans/${GITHUB_RUN_ID}/${bundle}" ]]
+
+          aws s3 cp "s3://${TF_STATE_BUCKET}/${PLAN_KEY}" "$bundle" \
+            --only-show-errors
+          printf '%s  %s\n' "$BUNDLE_SHA256" "$bundle" | sha256sum --check --strict
+          tar -xzf "$bundle"
+
+      - name: Apply the exact reviewed plan
+        run: terraform apply -input=false production.tfplan
+
+      - name: Remove the applied plan bundle
+        env:
+          PLAN_KEY: ${{ needs.plan.outputs.plan_key }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: aws s3 rm "s3://${TF_STATE_BUCKET}/${PLAN_KEY}" --only-show-errors
+
+      - name: Publish non-secret deployment outputs
+        run: terraform output

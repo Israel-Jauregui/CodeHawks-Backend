@@ -1,0 +1,524 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Manual CodeHawks backend bootstrap. Creates private Terraform state, bounded
+  runtime permissions, and separate GitHub OIDC plan and apply roles.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: Israel-Jauregui
+  GitHubOwnerId:
+    Type: String
+    Default: "29392107"
+    AllowedPattern: "^[0-9]+$"
+    Description: Immutable GitHub owner ID used in OIDC subject claims.
+  GitHubRepository:
+    Type: String
+    Default: CodeHawks-Backend
+  GitHubRepositoryId:
+    Type: String
+    Default: "1328057941"
+    AllowedPattern: "^[0-9]+$"
+    Description: Immutable GitHub repository ID used in OIDC subject claims.
+  PlanGitHubEnvironment:
+    Type: String
+    Default: backend-plan-production
+  ApplyGitHubEnvironment:
+    Type: String
+    Default: backend-infrastructure-production
+  AppResourcePrefix:
+    Type: String
+    Default: codehawks-production
+    AllowedPattern: "^[a-z0-9-]+$"
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >-
+      Set true only when this AWS account does not already have the GitHub
+      Actions OIDC provider. The CodeHawks frontend bootstrap normally owns it.
+
+Conditions:
+  ShouldCreateGitHubOidcProvider: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+
+Resources:
+  TerraformStateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub codehawks-backend-terraform-state-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldStateVersions
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+            Status: Enabled
+          - Id: ExpireSavedPlanBundles
+            ExpirationInDays: 2
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 2
+            Prefix: backend/plans/
+            Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Application
+          Value: CodeHawks
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: BackendTerraformState
+
+  TerraformStateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub ${TerraformStateBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateGitHubOidcProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Application
+          Value: CodeHawks
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  RuntimePermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: codehawks-backend-runtime-boundary
+      Description: Maximum permissions available to CodeHawks backend Lambda roles
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: UseClubTable
+            Effect: Allow
+            Action:
+              - dynamodb:BatchGetItem
+              - dynamodb:DeleteItem
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:UpdateItem
+            Resource:
+              - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AppResourcePrefix}
+              - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AppResourcePrefix}/index/*
+          - Sid: WriteFunctionLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*:*
+          - Sid: CreateMediaUploads
+            Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/*
+          - Sid: UseNewsletterQueues
+            Effect: Allow
+            Action:
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+            Resource: !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppResourcePrefix}-newsletter*
+          - Sid: SendClubEmail
+            Effect: Allow
+            Action: ses:SendEmail
+            Resource:
+              - !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*
+              - !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${AppResourcePrefix}-newsletters
+
+  TerraformPlanBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: codehawks-backend-terraform-plan-boundary
+      Description: Read-only AWS refresh plus a lock file for backend Terraform plans
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadTerraformStateBucket
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:ListBucket
+            Resource: !GetAtt TerraformStateBucket.Arn
+          - Sid: ReadTerraformState
+            Effect: Allow
+            Action: s3:GetObject
+            Resource:
+              - !Sub ${TerraformStateBucket.Arn}/backend/production.tfstate
+              - !Sub ${TerraformStateBucket.Arn}/backend/production.tfstate.tflock
+          - Sid: ManageTerraformPlanLock
+            Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:PutObject
+            Resource: !Sub ${TerraformStateBucket.Arn}/backend/production.tfstate.tflock
+          - Sid: WritePrivatePlanBundles
+            Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub ${TerraformStateBucket.Arn}/backend/plans/*
+          - Sid: ReadManagedInfrastructure
+            Effect: Allow
+            Action:
+              - apigateway:GET
+              - aws-portal:ViewBilling
+              - billing:GetBillingViewData
+              - budgets:DescribeBudgetAction
+              - budgets:DescribeBudgetActionsForAccount
+              - budgets:DescribeBudgetActionsForBudget
+              - budgets:ViewBudget
+              - cloudfront:Get*
+              - cloudfront:List*
+              - cloudwatch:DescribeAlarms
+              - cognito-idp:Describe*
+              - cognito-idp:Get*
+              - cognito-idp:List*
+              - logs:DescribeLogGroups
+              - ses:List*
+              - sts:GetCallerIdentity
+              - tag:GetResources
+              - tag:GetTagKeys
+              - tag:GetTagValues
+            Resource: "*"
+          - Sid: ReadBackendTable
+            Effect: Allow
+            Action:
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:DescribeContributorInsights
+              - dynamodb:DescribeKinesisStreamingDestination
+              - dynamodb:DescribeTable
+              - dynamodb:DescribeTimeToLive
+              - dynamodb:ListTagsOfResource
+            Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AppResourcePrefix}
+          - Sid: ReadBackendMediaConfiguration
+            Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:List*
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/*
+          - Sid: ReadBackendFunctions
+            Effect: Allow
+            Action:
+              - lambda:Get*
+              - lambda:ListTags
+              - lambda:ListVersionsByFunction
+            Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppResourcePrefix}-*
+          - Sid: ReadBackendLogTags
+            Effect: Allow
+            Action: logs:ListTagsForResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*:*
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppResourcePrefix}:*
+          - Sid: ReadBackendQueues
+            Effect: Allow
+            Action:
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListQueueTags
+            Resource: !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppResourcePrefix}-newsletter*
+          - Sid: ReadBackendEmailConfiguration
+            Effect: Allow
+            Action: ses:Get*
+            Resource:
+              - !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${AppResourcePrefix}-newsletters
+              - !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*
+          - Sid: ReadRuntimeRoles
+            Effect: Allow
+            Action:
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListAttachedRolePolicies
+              - iam:ListInstanceProfilesForRole
+              - iam:ListRolePolicies
+              - iam:ListRoleTags
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-api
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-newsletter-worker
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-cognito-trigger
+
+  TerraformApplyBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: codehawks-backend-terraform-apply-boundary
+      Description: Maximum permissions for owner-approved backend Terraform applies
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ManageTerraformStateBucket
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:ListBucket
+            Resource: !GetAtt TerraformStateBucket.Arn
+          - Sid: ManageTerraformState
+            Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub ${TerraformStateBucket.Arn}/backend/production.tfstate
+              - !Sub ${TerraformStateBucket.Arn}/backend/production.tfstate.tflock
+          - Sid: ReadAndDeletePrivatePlanBundles
+            Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:GetObject
+            Resource: !Sub ${TerraformStateBucket.Arn}/backend/plans/*
+          - Sid: ManageBackendDynamoDB
+            Effect: Allow
+            Action: dynamodb:*
+            Resource:
+              - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AppResourcePrefix}
+              - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AppResourcePrefix}/index/*
+          - Sid: ManageBackendMedia
+            Effect: Allow
+            Action: s3:*
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/*
+          - Sid: ManageBackendFunctions
+            Effect: Allow
+            Action: lambda:*
+            Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppResourcePrefix}-*
+          - Sid: ManageBackendLogs
+            Effect: Allow
+            Action: logs:*
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*:*
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppResourcePrefix}:*
+          - Sid: ListBackendLogs
+            Effect: Allow
+            Action: logs:DescribeLogGroups
+            Resource: "*"
+          - Sid: ManageBackendQueues
+            Effect: Allow
+            Action: sqs:*
+            Resource: !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppResourcePrefix}-newsletter*
+          - Sid: ListBackendQueues
+            Effect: Allow
+            Action: sqs:ListQueues
+            Resource: "*"
+          - Sid: ManageBackendAlarms
+            Effect: Allow
+            Action: cloudwatch:*
+            Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppResourcePrefix}-*
+          - Sid: ReadCloudWatchAlarms
+            Effect: Allow
+            Action: cloudwatch:DescribeAlarms
+            Resource: "*"
+          - Sid: ManageBackendEmail
+            Effect: Allow
+            Action: ses:*
+            Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${AppResourcePrefix}-newsletters
+          - Sid: ReadEmailResources
+            Effect: Allow
+            Action:
+              - ses:Get*
+              - ses:List*
+            Resource: "*"
+          - Sid: ManageRegionalApiGateway
+            Effect: Allow
+            Action: apigateway:*
+            Resource: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*
+          - Sid: ManageCloudFrontResources
+            Effect: Allow
+            Action: cloudfront:*
+            Resource: "*"
+          - Sid: ManageRegionalCognitoPools
+            Effect: Allow
+            Action: cognito-idp:*
+            Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+          - Sid: ListCognitoPools
+            Effect: Allow
+            Action: cognito-idp:ListUserPools
+            Resource: "*"
+          - Sid: ManageCodeHawksBudget
+            Effect: Allow
+            Action:
+              - aws-portal:ModifyBilling
+              - aws-portal:ViewBilling
+              - billing:GetBillingViewData
+              - budgets:ListTagsForResource
+              - budgets:ModifyBudget
+              - budgets:TagResource
+              - budgets:UntagResource
+              - budgets:ViewBudget
+            Resource: "*"
+          - Sid: CreateCognitoEmailServiceRole
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/email.cognito-idp.amazonaws.com/AWSServiceRoleForAmazonCognitoIdpEmailService
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: email.cognito-idp.amazonaws.com
+          - Sid: CreateBoundedRuntimeRoles
+            Effect: Allow
+            Action: iam:CreateRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-api
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-newsletter-worker
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-cognito-trigger
+            Condition:
+              StringEquals:
+                iam:PermissionsBoundary: !Ref RuntimePermissionsBoundary
+          - Sid: ManageBoundedRuntimeRoles
+            Effect: Allow
+            Action:
+              - iam:DeleteRole
+              - iam:DeleteRolePolicy
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListAttachedRolePolicies
+              - iam:ListInstanceProfilesForRole
+              - iam:ListRolePolicies
+              - iam:ListRoleTags
+              - iam:PutRolePolicy
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:UpdateRoleDescription
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-api
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-newsletter-worker
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-cognito-trigger
+          - Sid: PassBoundedRolesToLambda
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-api
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-newsletter-worker
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AppResourcePrefix}-cognito-trigger
+            Condition:
+              StringEquals:
+                iam:PassedToService: lambda.amazonaws.com
+          - Sid: VerifyApplyIdentity
+            Effect: Allow
+            Action: sts:GetCallerIdentity
+            Resource: "*"
+
+  TerraformPlanRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: codehawks-backend-terraform-plan
+      Description: GitHub OIDC role for read-only backend Terraform plans
+      MaxSessionDuration: 3600
+      PermissionsBoundary: !Ref TerraformPlanBoundary
+      ManagedPolicyArns:
+        - !Ref TerraformPlanBoundary
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If
+                - ShouldCreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:environment:${PlanGitHubEnvironment}
+      Tags:
+        - Key: Application
+          Value: CodeHawks
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  TerraformApplyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: codehawks-backend-terraform-apply
+      Description: GitHub OIDC role for owner-approved backend Terraform applies
+      MaxSessionDuration: 3600
+      PermissionsBoundary: !Ref TerraformApplyBoundary
+      ManagedPolicyArns:
+        - !Ref TerraformApplyBoundary
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If
+                - ShouldCreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:environment:${ApplyGitHubEnvironment}
+      Tags:
+        - Key: Application
+          Value: CodeHawks
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  AwsAccountId:
+    Description: Set this as AWS_ACCOUNT_ID in both GitHub environments.
+    Value: !Ref AWS::AccountId
+  AwsRegion:
+    Description: Set this as AWS_REGION in both GitHub environments.
+    Value: !Ref AWS::Region
+  TerraformStateBucketName:
+    Description: Set this as TF_STATE_BUCKET in both GitHub environments.
+    Value: !Ref TerraformStateBucket
+  TerraformPlanRoleArn:
+    Description: Set this as AWS_PLAN_ROLE_ARN in backend-plan-production.
+    Value: !GetAtt TerraformPlanRole.Arn
+  TerraformApplyRoleArn:
+    Description: Set this as AWS_APPLY_ROLE_ARN in backend-infrastructure-production.
+    Value: !GetAtt TerraformApplyRole.Arn
+  RuntimePermissionsBoundaryArn:
+    Description: Set this as RUNTIME_PERMISSIONS_BOUNDARY_ARN in backend-plan-production.
+    Value: !Ref RuntimePermissionsBoundary
+  GitHubOidcProviderArn:
+    Description: GitHub Actions OIDC provider used by both roles.
+    Value: !If
+      - ShouldCreateGitHubOidcProvider
+      - !Ref GitHubOidcProvider
+      - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
