@@ -352,7 +352,9 @@ Resources:
           - Sid: ManageBackendEmail
             Effect: Allow
             Action: ses:*
-            Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${AppResourcePrefix}-newsletters
+            Resource:
+              - !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${AppResourcePrefix}-newsletters
+              - !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*
           - Sid: ReadEmailResources
             Effect: Allow
             Action:

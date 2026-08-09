@@ -51,11 +51,18 @@ variable "entra_required_scope" {
   default     = "access_as_user"
 }
 
-variable "ses_identity_arn" {
-  description = "Verified SES domain/email identity ARN used for newsletters and Cognito messages. Required for every deployment."
+variable "ses_domain" {
+  description = "Club-owned domain that Terraform registers as the regional SES identity. Its Easy DKIM tokens are handed to the frontend DNS state."
   type        = string
-  default     = null
-  nullable    = true
+  default     = "codehawks.org"
+
+  validation {
+    condition = (
+      can(regex("^[a-z0-9][a-z0-9.-]*\\.[a-z]{2,63}$", var.ses_domain)) &&
+      !strcontains(var.ses_domain, "..")
+    )
+    error_message = "ses_domain must be a lowercase DNS domain name such as codehawks.org."
+  }
 }
 
 variable "email_from_address" {

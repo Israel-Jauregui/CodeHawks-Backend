@@ -1,9 +1,10 @@
 environment = "dev"
 aws_region  = "us-east-1"
 
-# Required for newsletters in either auth mode and for activation/login codes
-# in Cognito mode. The identity must be verified and SES must have production access.
-ses_identity_arn      = "arn:aws:ses:us-east-1:123456789012:identity/codehawks.org"
+# Terraform creates the regional SES domain identity. After the backend apply,
+# copy ses_dkim_tokens_json to the frontend infrastructure workflow so its
+# Cloudflare-owned Terraform state can publish the three Easy DKIM CNAMEs.
+ses_domain            = "codehawks.org"
 email_from_address    = "CodeHawks <noreply@codehawks.org>"
 email_reply_to_address = "officers@codehawks.org"
 

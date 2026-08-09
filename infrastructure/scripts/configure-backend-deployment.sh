@@ -12,7 +12,7 @@ full_name="${owner}/${repository}"
 : "${TF_STATE_BUCKET:?Copy TerraformStateBucketName from the backend bootstrap stack outputs}"
 : "${RUNTIME_PERMISSIONS_BOUNDARY_ARN:?Copy RuntimePermissionsBoundaryArn from the backend bootstrap stack outputs}"
 : "${AUTH_PROVIDER:?Set entra or cognito}"
-: "${SES_IDENTITY_ARN:?Set the verified SES identity ARN in AWS_REGION}"
+: "${SES_DOMAIN:?Set the club-owned domain Terraform will register with SES}"
 : "${EMAIL_FROM_ADDRESS:?Set the verified From address}"
 : "${ALLOWED_ORIGINS:?Set a JSON array of exact HTTPS frontend origins}"
 
@@ -26,7 +26,7 @@ EMAIL_REPLY_TO_ADDRESS="${EMAIL_REPLY_TO_ADDRESS:-}"
 [[ "$TF_STATE_BUCKET" == "codehawks-backend-terraform-state-${AWS_ACCOUNT_ID}" ]]
 [[ "$RUNTIME_PERMISSIONS_BOUNDARY_ARN" == "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/codehawks-backend-runtime-boundary" ]]
 [[ "$AUTH_PROVIDER" == "entra" || "$AUTH_PROVIDER" == "cognito" ]]
-[[ "$SES_IDENTITY_ARN" == "arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT_ID}:identity/"* ]]
+[[ "$SES_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]
 jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and startswith("https://"))' \
   <<<"$ALLOWED_ORIGINS" >/dev/null
 
@@ -52,10 +52,17 @@ set_plan_variable TF_STATE_BUCKET "$TF_STATE_BUCKET"
 set_plan_variable RUNTIME_PERMISSIONS_BOUNDARY_ARN "$RUNTIME_PERMISSIONS_BOUNDARY_ARN"
 set_plan_variable AUTH_PROVIDER "$AUTH_PROVIDER"
 set_plan_variable ENTRA_API_CLIENT_ID "$ENTRA_API_CLIENT_ID"
-set_plan_variable SES_IDENTITY_ARN "$SES_IDENTITY_ARN"
+set_plan_variable SES_DOMAIN "$SES_DOMAIN"
 set_plan_variable EMAIL_FROM_ADDRESS "$EMAIL_FROM_ADDRESS"
-set_plan_variable EMAIL_REPLY_TO_ADDRESS "$EMAIL_REPLY_TO_ADDRESS"
 set_plan_variable ALLOWED_ORIGINS "$ALLOWED_ORIGINS"
+
+if [[ -n "$EMAIL_REPLY_TO_ADDRESS" ]]; then
+  set_plan_variable EMAIL_REPLY_TO_ADDRESS "$EMAIL_REPLY_TO_ADDRESS"
+else
+  gh variable delete EMAIL_REPLY_TO_ADDRESS \
+    --repo "$full_name" \
+    --env "$plan_environment" 2>/dev/null || true
+fi
 
 set_apply_variable AWS_ACCOUNT_ID "$AWS_ACCOUNT_ID"
 set_apply_variable AWS_REGION "$AWS_REGION"

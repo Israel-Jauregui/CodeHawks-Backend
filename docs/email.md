@@ -62,13 +62,24 @@ The API never sends a club-wide email during the HTTP request. Queue messages co
 
 SQS and Lambda are at-least-once systems. Delivery records suppress normal redelivery duplicates; a process failure in the narrow interval after SES accepts a message but before DynamoDB records it can still cause a duplicate. Eliminating that final distributed-systems edge would require an email provider API with a durable idempotency token.
 
-## AWS prerequisites
+## SES identity and DNS workflow
 
-- Verify a club-owned SES domain or From address in the deployment region.
-- Publish the SES-provided DKIM DNS records.
-- Request SES production access. In the sandbox, sending is restricted and normal `@ung.edu` recipients will not work unless individually verified.
-- Set `ses_identity_arn`, `email_from_address`, and optionally `email_reply_to_address` in Terraform.
-- Monitor SES reputation metrics and the newsletter dead-letter queue.
+SES and public DNS live in separate Terraform states because they have different owners:
+
+- `CodeHawks-Backend/infrastructure` creates the regional SES domain identity and outputs its three Easy DKIM tokens.
+- `CodeHawks-FrontEnd/infrastructure` owns the Cloudflare zone and creates one unproxied CNAME per token.
+
+For the first deployment:
+
+1. Create or update the backend bootstrap stack from its reviewed template so the apply role may manage the SES identity.
+2. Run the backend workflow with `operation=plan`, review it, then run `operation=plan-and-apply` and approve the exact plan.
+3. Copy the backend `ses_dkim_tokens_json` output exactly. It is a JSON array of three non-secret strings.
+4. Store that JSON array as `SES_DKIM_TOKENS` in the frontend repository's `infrastructure-production` GitHub environment.
+5. Run and approve the frontend **Apply infrastructure** workflow. It creates `<token>._domainkey.codehawks.org` CNAMEs targeting `<token>.dkim.amazonses.com` with Cloudflare proxying disabled.
+6. Wait until the SES identity verification and DKIM status are successful in the same AWS region.
+7. Have the human owner request SES production access. This account-level approval remains manual; Terraform must not pretend it can grant it.
+
+In the SES sandbox, sending is restricted and normal `@ung.edu` recipients will not work unless individually verified. Configure `ses_domain`, `email_from_address`, and optionally `email_reply_to_address` in backend Terraform, and monitor SES reputation metrics plus the newsletter dead-letter queue after production approval.
 
 The SES configuration set automatically suppresses destinations that bounce or complain. Before production, decide whether routine club newsletters need a user preference/unsubscribe workflow; account-security and login-code messages must remain transactional.
 
