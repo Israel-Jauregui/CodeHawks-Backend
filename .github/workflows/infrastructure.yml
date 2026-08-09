@@ -39,7 +39,7 @@ jobs:
       TF_VAR_aws_region: ${{ vars.AWS_REGION }}
       TF_VAR_auth_provider: ${{ vars.AUTH_PROVIDER }}
       TF_VAR_entra_api_client_id: ${{ vars.ENTRA_API_CLIENT_ID }}
-      TF_VAR_ses_identity_arn: ${{ vars.SES_IDENTITY_ARN }}
+      TF_VAR_ses_domain: ${{ vars.SES_DOMAIN }}
       TF_VAR_email_from_address: ${{ vars.EMAIL_FROM_ADDRESS }}
       TF_VAR_email_reply_to_address: ${{ vars.EMAIL_REPLY_TO_ADDRESS }}
       TF_VAR_allowed_origins: ${{ vars.ALLOWED_ORIGINS }}
@@ -83,7 +83,7 @@ jobs:
             AWS_REGION
             TF_STATE_BUCKET
             TF_VAR_auth_provider
-            TF_VAR_ses_identity_arn
+            TF_VAR_ses_domain
             TF_VAR_email_from_address
             TF_VAR_allowed_origins
             TF_VAR_runtime_permissions_boundary_arn
@@ -100,7 +100,7 @@ jobs:
           [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
           [[ "$AWS_PLAN_ROLE_ARN" == "arn:aws:iam::${AWS_ACCOUNT_ID}:role/codehawks-backend-terraform-plan" ]]
           [[ "$TF_STATE_BUCKET" == "codehawks-backend-terraform-state-${AWS_ACCOUNT_ID}" ]]
-          [[ "$TF_VAR_ses_identity_arn" == "arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT_ID}:identity/"* ]]
+          [[ "$TF_VAR_ses_domain" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]
           [[ "$TF_VAR_runtime_permissions_boundary_arn" == "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/codehawks-backend-runtime-boundary" ]]
           [[ "$TF_VAR_auth_provider" == "entra" || "$TF_VAR_auth_provider" == "cognito" ]]
           jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and startswith("https://"))' \
@@ -276,4 +276,16 @@ jobs:
         run: aws s3 rm "s3://${TF_STATE_BUCKET}/${PLAN_KEY}" --only-show-errors
 
       - name: Publish non-secret deployment outputs
-        run: terraform output
+        run: |
+          set -euo pipefail
+          terraform output
+          {
+            echo '### SES DNS handoff'
+            echo
+            echo 'Copy this JSON array into the frontend infrastructure-production variable `SES_DKIM_TOKENS`:'
+            echo
+            echo '```json'
+            terraform output -raw ses_dkim_tokens_json
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

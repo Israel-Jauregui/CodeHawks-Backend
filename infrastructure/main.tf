@@ -27,8 +27,8 @@ check "authentication_configuration" {
 
 check "email_configuration" {
   assert {
-    condition     = var.ses_identity_arn != null && var.email_from_address != null
-    error_message = "ses_identity_arn and email_from_address are required for account and newsletter email."
+    condition     = var.email_from_address != null
+    error_message = "email_from_address is required for account and newsletter email."
   }
 }
 
@@ -41,10 +41,6 @@ check "production_permissions_boundary" {
 
 locals {
   configured_email_from = coalesce(var.email_from_address, "not-configured@example.invalid")
-  configured_ses_identity_arn = coalesce(
-    var.ses_identity_arn,
-    "arn:aws:ses:${var.aws_region}:${data.aws_caller_identity.current.account_id}:identity/not-configured"
-  )
 }
 
 resource "aws_dynamodb_table" "club" {
@@ -141,6 +137,19 @@ resource "aws_sesv2_configuration_set" "newsletters" {
 
   sending_options {
     sending_enabled = true
+  }
+}
+
+resource "aws_sesv2_email_identity" "club" {
+  email_identity         = var.ses_domain
+  configuration_set_name = aws_sesv2_configuration_set.newsletters.configuration_set_name
+
+  dkim_signing_attributes {
+    next_signing_key_length = "RSA_2048_BIT"
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 
@@ -433,7 +442,7 @@ data "aws_iam_policy_document" "newsletter_worker" {
   statement {
     sid       = "SendClubEmail"
     actions   = ["ses:SendEmail"]
-    resources = [local.configured_ses_identity_arn, aws_sesv2_configuration_set.newsletters.arn]
+    resources = [aws_sesv2_email_identity.club.arn, aws_sesv2_configuration_set.newsletters.arn]
   }
 
   statement {
@@ -596,7 +605,7 @@ resource "aws_cognito_user_pool" "members" {
   email_configuration {
     email_sending_account = "DEVELOPER"
     from_email_address    = local.configured_email_from
-    source_arn            = local.configured_ses_identity_arn
+    source_arn            = aws_sesv2_email_identity.club.arn
   }
 
   email_verification_message = "Welcome to CodeHawks. Your account activation code is {####}. This code expires automatically; ignore this email if you did not sign up."

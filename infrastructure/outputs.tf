@@ -57,3 +57,18 @@ output "ses_configuration_set_name" {
   description = "SES configuration set used for newsletter suppression and reputation metrics."
   value       = aws_sesv2_configuration_set.newsletters.configuration_set_name
 }
+
+output "ses_identity_arn" {
+  description = "Terraform-owned SES domain identity used by the backend."
+  value       = aws_sesv2_email_identity.club.arn
+}
+
+output "ses_dkim_tokens" {
+  description = "Easy DKIM tokens to copy into the frontend infrastructure SES_DKIM_TOKENS GitHub variable as a JSON array."
+  value       = tolist(aws_sesv2_email_identity.club.dkim_signing_attributes[0].tokens)
+}
+
+output "ses_dkim_tokens_json" {
+  description = "Copy-ready JSON form of ses_dkim_tokens for the frontend/domain Terraform handoff."
+  value       = jsonencode(tolist(aws_sesv2_email_identity.club.dkim_signing_attributes[0].tokens))
+}

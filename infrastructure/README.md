@@ -6,7 +6,7 @@ Terraform provisions:
 - one ARM64 Node.js 22 API Lambda with least-privilege DynamoDB/log/media-write IAM
 - one API Gateway HTTP API with exact-origin CORS, public reads, JWT authorization for protected `/v1/*`, access logs, and throttling
 - one private S3 media bucket and CloudFront distribution with origin access control
-- one encrypted SQS newsletter queue, dead-letter queue, single-concurrency worker Lambda, and SES configuration set with bounce/complaint suppression
+- one encrypted SQS newsletter queue, dead-letter queue, single-concurrency worker Lambda, SES domain identity with Easy DKIM, and configuration set with bounce/complaint suppression
 - in `entra` mode: an authorizer pinned to the UNG issuer and our external multitenant API audience/scope
 - in `cognito` mode: an Essentials passwordless email-OTP user pool/client and a small domain/token-claims Lambda; email delivery uses the supplied SES identity
 - optional AWS Budget email notification
@@ -19,13 +19,13 @@ There are no long-lived AWS access keys in GitHub. GitHub Actions obtains short-
 
 Developer machines and agents do not run `terraform apply`, `terraform destroy`, or mutating AWS CLI commands. Ongoing infrastructure changes use the manual GitHub workflow and the protected apply environment. The one unavoidable trust bootstrap is created manually in CloudFormation by the AWS account administrator.
 
-## 1. Prepare the external dependencies
+## 1. Prepare the cross-state deployment
 
 Before provisioning AWS resources:
 
 1. Decide between Entra and Cognito using [`../docs/authentication.md`](../docs/authentication.md). For Entra, complete the ordinary-user consent probe and create the external API registration.
-2. Verify the club's SES sender identity and DKIM in the target region, request SES production sending access, and record the identity ARN.
-3. Confirm the exact AWS account ID, region, frontend HTTPS origins, auth mode, and email addresses. Do not proceed if any target is ambiguous.
+2. Confirm that the frontend repository's Terraform state still owns the `codehawks.org` Cloudflare zone. Backend Terraform creates the SES identity; frontend Terraform publishes the returned DKIM CNAMEs.
+3. Confirm the exact AWS account ID, region, SES domain, frontend HTTPS origins, auth mode, and email addresses. Do not proceed if any target is ambiguous.
 
 ## 2. Bootstrap state and GitHub OIDC
 
@@ -63,7 +63,7 @@ TF_STATE_BUCKET="codehawks-backend-terraform-state-123456789012" \
 RUNTIME_PERMISSIONS_BOUNDARY_ARN="arn:aws:iam::123456789012:policy/codehawks-backend-runtime-boundary" \
 AUTH_PROVIDER="entra" \
 ENTRA_API_CLIENT_ID="00000000-0000-0000-0000-000000000000" \
-SES_IDENTITY_ARN="arn:aws:ses:us-east-1:123456789012:identity/codehawks.org" \
+SES_DOMAIN="codehawks.org" \
 EMAIL_FROM_ADDRESS="CodeHawks <noreply@codehawks.org>" \
 EMAIL_REPLY_TO_ADDRESS="officers@codehawks.org" \
 ALLOWED_ORIGINS='["https://codehawks.org","https://www.codehawks.org"]' \
@@ -71,6 +71,8 @@ ALLOWED_ORIGINS='["https://codehawks.org","https://www.codehawks.org"]' \
 ```
 
 For Cognito, set `AUTH_PROVIDER=cognito` and omit `ENTRA_API_CLIENT_ID`. To create an AWS Budget notification, also set `BUDGET_NOTIFICATION_EMAIL`; the helper stores it as a GitHub environment secret and Terraform marks it sensitive.
+
+The former `SES_IDENTITY_ARN` GitHub variable is no longer consumed because this Terraform state now owns the identity. Remove that obsolete variable after `SES_DOMAIN` is configured to avoid misleading future operators.
 
 ## 5. Create and review the first plan
 
@@ -90,7 +92,9 @@ Rerun the same workflow with `operation=plan-and-apply`. It creates a fresh plan
 
 Reject the environment deployment if the plan is wrong. No AWS apply runs automatically on a push or pull request.
 
-After a successful apply, copy `api_url`, the selected authentication outputs, and `media_public_base_url` into the frontend integration. Sign in once as the intended first President, then use the one-time role command in [`../docs/bootstrap.md`](../docs/bootstrap.md).
+After the first successful apply, copy the exact JSON array under **SES DNS handoff** in the run summary into the frontend repository's `infrastructure-production` GitHub environment variable named `SES_DKIM_TOKENS`. It is the raw `ses_dkim_tokens_json` output, without Terraform's display escaping. Run and approve the frontend **Apply infrastructure** workflow; its domain-owning Terraform state creates the three unproxied Cloudflare CNAMEs. Wait for SES identity verification and DKIM status to become successful, then have the human owner request SES production access in this same AWS region. Do not create the SES identity or DNS records manually.
+
+Then copy `api_url`, the selected authentication outputs, and `media_public_base_url` into the frontend integration. Sign in once as the intended first President, then use the one-time role command in [`../docs/bootstrap.md`](../docs/bootstrap.md).
 
 ## Local validation
 

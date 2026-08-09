@@ -5,7 +5,7 @@
 - intended AWS account ID and region
 - remote Terraform state bucket/key
 - exact development and production frontend origins
-- verified SES identity/From address, DKIM DNS records, and SES production access
+- SES domain/From address; the backend-to-frontend Terraform DKIM handoff completed; and human-approved SES production access
 - auth decision from [authentication.md](authentication.md)
 - in Entra mode: our multitenant API client ID, SPA client ID, and redirect URIs
 - in Cognito mode: completed activation-code and passwordless-login frontend screens

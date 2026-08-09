@@ -2,7 +2,7 @@
 
 AWS-native backend for the CodeHawks / UNG App Development Club website. This is a clean serverless replacement for the unfinished Linux/PostgreSQL backend: the old project informed the domain, but its authentication and implementation details were not copied.
 
-The repository is ready for local verification and the protected AWS bootstrap/plan/apply process. It has **not** been deployed; the intended AWS account/region, SES identity, frontend origins, and final authentication choice must still be confirmed.
+The repository is ready for local verification and the protected AWS bootstrap/plan/apply process. It has **not** been deployed; the intended AWS account/region, SES domain, frontend origins, and final authentication choice must still be confirmed.
 
 ## Authentication without depending on UNG IT
 
@@ -82,11 +82,11 @@ terraform -chdir=infrastructure validate
 ## Deployment handoff
 
 1. Decide between Entra and Cognito using [docs/authentication.md](docs/authentication.md). Probe Entra consent before committing the frontend to Microsoft sign-in.
-2. Verify the club's SES sender identity/DKIM and request production sending access; see [docs/email.md](docs/email.md).
-3. Follow the [infrastructure runbook](infrastructure/README.md) to create the manual CloudFormation bootstrap in the confirmed AWS account and region.
-4. Configure the main-only GitHub plan environment and owner-approved apply environment from the bootstrap outputs.
-5. Run the manual workflow with `operation=plan`, and review the full plan without changing AWS.
-6. Rerun with `operation=plan-and-apply`, review the fresh plan, and approve the waiting apply environment only when it is correct.
+2. Follow the [infrastructure runbook](infrastructure/README.md) to create or update the manual CloudFormation bootstrap in the confirmed AWS account and region.
+3. Configure the main-only GitHub plan environment and owner-approved apply environment from the bootstrap outputs.
+4. Run the manual workflow with `operation=plan`, and review the full plan without changing AWS.
+5. Rerun with `operation=plan-and-apply`, review the fresh plan, and approve the waiting apply environment only when it is correct. This creates the SES identity and prints its Easy DKIM tokens.
+6. Complete the cross-repository DNS handoff and human-owned SES production-access request in [docs/email.md](docs/email.md).
 7. Sign in once as the intended first President, then use the one-time bootstrap command in [docs/bootstrap.md](docs/bootstrap.md).
 8. Connect the frontend using [docs/frontend-integration.md](docs/frontend-integration.md).
 
