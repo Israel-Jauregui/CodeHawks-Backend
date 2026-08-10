@@ -6,12 +6,17 @@ Terraform provisions:
 - one ARM64 Node.js 22 API Lambda with least-privilege DynamoDB/log/media-write IAM
 - one API Gateway HTTP API with exact-origin CORS, public reads, JWT authorization for protected `/v1/*`, access logs, and throttling
 - one private S3 media bucket and CloudFront distribution with origin access control
-- one encrypted SQS newsletter queue, dead-letter queue, single-concurrency worker Lambda, SES domain identity with Easy DKIM, and configuration set with bounce/complaint suppression
+- one encrypted SQS newsletter queue, dead-letter queue, batch-one worker Lambda, SES domain identity with Easy DKIM, and configuration set with bounce/complaint suppression
 - in `entra` mode: an authorizer pinned to the UNG issuer and our external multitenant API audience/scope
 - in `cognito` mode: an Essentials passwordless email-OTP user pool/client and a small domain/token-claims Lambda; email delivery uses the supplied SES identity
 - optional AWS Budget email notification
 
 The auth modes are alternatives. Resources specific to Cognito use `count = 0` in Entra mode.
+
+The newsletter event source passes one queued job to each worker invocation. The
+worker does not reserve Lambda concurrency because low-quota AWS accounts cannot
+reserve capacity while preserving AWS's required unreserved pool. Request a
+regional concurrency quota increase before adding a reservation.
 
 There are no long-lived AWS access keys in GitHub. GitHub Actions obtains short-lived OIDC sessions from separate plan and apply roles. The plan role can read infrastructure and hold only the Terraform state lock. The apply role is owner-gated and can manage the backend resources, but cannot edit its own role, trust policy, or permissions boundary. Terraform-created Lambda roles receive a separate runtime boundary that excludes IAM administration.
 
