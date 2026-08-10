@@ -45,6 +45,11 @@ GitHub cannot assume an AWS role until AWS trusts GitHub, so the first action is
 
 The state bucket is private, encrypted, versioned, TLS-only, and retained if the stack is deleted. Bootstrap template updates remain manual AWS-admin changes. This intentional separation prevents a compromised routine apply workflow from granting itself more AWS access.
 
+The role lifecycle audit and the reasons for its narrowly isolated wildcard
+permissions are documented in
+[`bootstrap/PERMISSIONS.md`](bootstrap/PERMISSIONS.md). Update that audit in the
+same pull request whenever Terraform begins managing another AWS resource type.
+
 ## 3. Protect the GitHub gates
 
 After the first **Verify application and infrastructure** check appears on `main`, run this GitHub-only helper from the repository root:

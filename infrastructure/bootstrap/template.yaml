@@ -206,6 +206,7 @@ Resources:
               - budgets:DescribeBudgetAction
               - budgets:DescribeBudgetActionsForAccount
               - budgets:DescribeBudgetActionsForBudget
+              - budgets:ListTagsForResource
               - budgets:ViewBudget
               - cloudfront:Get*
               - cloudfront:List*
@@ -248,7 +249,13 @@ Resources:
               - lambda:Get*
               - lambda:ListTags
               - lambda:ListVersionsByFunction
-            Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppResourcePrefix}-*
+            Resource:
+              - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppResourcePrefix}-*
+              - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*
+          - Sid: ListBackendEventSourceMappings
+            Effect: Allow
+            Action: lambda:ListEventSourceMappings
+            Resource: "*"
           - Sid: ReadBackendLogTags
             Effect: Allow
             Action: logs:ListTagsForResource
@@ -325,10 +332,19 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}
               - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/*
-          - Sid: ManageBackendFunctions
+          - Sid: ManageBackendLambdaResources
             Effect: Allow
             Action: lambda:*
-            Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppResourcePrefix}-*
+            Resource:
+              - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppResourcePrefix}-*
+              - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*
+          - Sid: CreateBackendEventSourceMappings
+            Effect: Allow
+            Action: lambda:CreateEventSourceMapping
+            Resource: "*"
+            Condition:
+              ArnLike:
+                lambda:FunctionArn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppResourcePrefix}-*
           - Sid: ManageBackendLogs
             Effect: Allow
             Action: logs:*
@@ -337,49 +353,39 @@ Resources:
               - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*:*
               - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppResourcePrefix}
               - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppResourcePrefix}:*
-          - Sid: ListBackendLogs
-            Effect: Allow
-            Action: logs:DescribeLogGroups
-            Resource: "*"
-          - Sid: ConfigureApiGatewayAccessLogs
+          - Sid: AccountLevelReadsAndLogDelivery
             Effect: Allow
             Action:
+              - cloudwatch:DescribeAlarms
+              - cognito-idp:ListUserPools
+              - lambda:ListEventSourceMappings
               - logs:CreateLogDelivery
               - logs:DeleteLogDelivery
+              - logs:DescribeLogGroups
               - logs:DescribeResourcePolicies
               - logs:GetLogDelivery
               - logs:ListLogDeliveries
               - logs:PutResourcePolicy
               - logs:UpdateLogDelivery
+              - ses:Get*
+              - ses:List*
+              - sqs:ListQueues
+              - sts:GetCallerIdentity
             Resource: "*"
           - Sid: ManageBackendQueues
             Effect: Allow
             Action: sqs:*
             Resource: !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AppResourcePrefix}-newsletter*
-          - Sid: ListBackendQueues
-            Effect: Allow
-            Action: sqs:ListQueues
-            Resource: "*"
           - Sid: ManageBackendAlarms
             Effect: Allow
             Action: cloudwatch:*
             Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppResourcePrefix}-*
-          - Sid: ReadCloudWatchAlarms
-            Effect: Allow
-            Action: cloudwatch:DescribeAlarms
-            Resource: "*"
           - Sid: ManageBackendEmail
             Effect: Allow
             Action: ses:*
             Resource:
               - !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${AppResourcePrefix}-newsletters
               - !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*
-          - Sid: ReadEmailResources
-            Effect: Allow
-            Action:
-              - ses:Get*
-              - ses:List*
-            Resource: "*"
           - Sid: ManageRegionalApiGateway
             Effect: Allow
             Action: apigateway:*
@@ -394,10 +400,14 @@ Resources:
             Effect: Allow
             Action: cognito-idp:*
             Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
-          - Sid: ListCognitoPools
+          - Sid: CreateTaggedCognitoPools
             Effect: Allow
-            Action: cognito-idp:ListUserPools
+            Action: cognito-idp:CreateUserPool
             Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: CodeHawks
+                aws:RequestTag/ManagedBy: Terraform
           - Sid: ManageCodeHawksBudget
             Effect: Allow
             Action:
@@ -410,13 +420,17 @@ Resources:
               - budgets:UntagResource
               - budgets:ViewBudget
             Resource: "*"
-          - Sid: CreateCognitoEmailServiceRole
+          - Sid: CreateRequiredServiceLinkedRoles
             Effect: Allow
             Action: iam:CreateServiceLinkedRole
-            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/email.cognito-idp.amazonaws.com/AWSServiceRoleForAmazonCognitoIdpEmailService
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/budgets.amazonaws.com/AWSServiceRoleForBudgets
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/email.cognito-idp.amazonaws.com/AWSServiceRoleForAmazonCognitoIdpEmailService
             Condition:
               StringEquals:
-                iam:AWSServiceName: email.cognito-idp.amazonaws.com
+                iam:AWSServiceName:
+                  - budgets.amazonaws.com
+                  - email.cognito-idp.amazonaws.com
           - Sid: CreateBoundedRuntimeRoles
             Effect: Allow
             Action: iam:CreateRole
@@ -457,10 +471,6 @@ Resources:
             Condition:
               StringEquals:
                 iam:PassedToService: lambda.amazonaws.com
-          - Sid: VerifyApplyIdentity
-            Effect: Allow
-            Action: sts:GetCallerIdentity
-            Resource: "*"
 
   TerraformPlanRole:
     Type: AWS::IAM::Role
