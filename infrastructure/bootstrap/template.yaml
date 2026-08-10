@@ -220,6 +220,10 @@ Resources:
               - tag:GetTagKeys
               - tag:GetTagValues
             Resource: "*"
+          - Sid: ReadBackendAlarmTags
+            Effect: Allow
+            Action: cloudwatch:ListTagsForResource
+            Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AppResourcePrefix}-*
           - Sid: ReadBackendTable
             Effect: Allow
             Action:
