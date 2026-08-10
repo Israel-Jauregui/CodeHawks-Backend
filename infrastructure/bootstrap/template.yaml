@@ -249,7 +249,9 @@ Resources:
             Effect: Allow
             Action: logs:ListTagsForResource
             Resource:
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*
               - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*:*
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppResourcePrefix}
               - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppResourcePrefix}:*
           - Sid: ReadBackendQueues
             Effect: Allow
@@ -327,7 +329,9 @@ Resources:
             Effect: Allow
             Action: logs:*
             Resource:
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*
               - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*:*
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppResourcePrefix}
               - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AppResourcePrefix}:*
           - Sid: ListBackendLogs
             Effect: Allow
@@ -364,7 +368,9 @@ Resources:
           - Sid: ManageRegionalApiGateway
             Effect: Allow
             Action: apigateway:*
-            Resource: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*
+            Resource:
+              - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*
+              - !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/tags/*
           - Sid: ManageCloudFrontResources
             Effect: Allow
             Action: cloudfront:*
