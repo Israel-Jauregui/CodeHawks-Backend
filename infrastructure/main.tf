@@ -467,16 +467,15 @@ resource "aws_cloudwatch_log_group" "newsletter_worker" {
 }
 
 resource "aws_lambda_function" "newsletter_worker" {
-  function_name                  = "${local.resource_prefix}-newsletter-worker"
-  description                    = "Fans newsletters out to active club members and sends through SES"
-  role                           = aws_iam_role.newsletter_worker.arn
-  architectures                  = ["arm64"]
-  filename                       = data.archive_file.newsletter_worker.output_path
-  handler                        = "newsletter-worker.handler"
-  memory_size                    = 256
-  reserved_concurrent_executions = 1
-  runtime                        = "nodejs22.x"
-  timeout                        = 120
+  function_name = "${local.resource_prefix}-newsletter-worker"
+  description   = "Fans newsletters out to active club members and sends through SES"
+  role          = aws_iam_role.newsletter_worker.arn
+  architectures = ["arm64"]
+  filename      = data.archive_file.newsletter_worker.output_path
+  handler       = "newsletter-worker.handler"
+  memory_size   = 256
+  runtime       = "nodejs22.x"
+  timeout       = 120
 
   source_code_hash = data.archive_file.newsletter_worker.output_base64sha256
 
