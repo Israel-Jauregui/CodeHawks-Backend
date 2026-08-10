@@ -483,7 +483,7 @@ resource "aws_lambda_function" "newsletter_worker" {
   environment {
     variables = {
       EMAIL_FROM_ADDRESS         = local.configured_email_from
-      EMAIL_REPLY_TO_ADDRESS     = coalesce(var.email_reply_to_address, "")
+      EMAIL_REPLY_TO_ADDRESS     = var.email_reply_to_address == null ? "" : var.email_reply_to_address
       NEWSLETTER_QUEUE_URL       = aws_sqs_queue.newsletter.url
       SES_CONFIGURATION_SET_NAME = aws_sesv2_configuration_set.newsletters.configuration_set_name
       TABLE_NAME                 = aws_dynamodb_table.club.name
