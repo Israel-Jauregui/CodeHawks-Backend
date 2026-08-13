@@ -24,7 +24,7 @@ The bootstrap has three permission boundaries with deliberately different jobs:
 | SQS newsletter queue and DLQ | Queue attributes, URL, and tags on the CodeHawks queue prefix | Queue lifecycle on the CodeHawks queue prefix |
 | CloudWatch alarm | Describe globally; tags on the CodeHawks alarm prefix | Alarm lifecycle on the CodeHawks alarm prefix |
 | SES identity and configuration set | Regional identity/configuration reads | Lifecycle on the CodeHawks SES identity and configuration set |
-| API Gateway HTTP API | Regional API reads | Lifecycle under the regional `/apis` and `/tags` paths |
+| API Gateway HTTP API, routes, and unauthenticated CORS preflight route | Regional API reads | Lifecycle under the regional `/apis` and `/tags` paths |
 | CloudFront media distribution and policies | Global CloudFront reads | CloudFront lifecycle; create/list APIs require wildcard resources |
 | Cognito fallback resources | Regional pool reads | Tagged pool creation, regional pool lifecycle, and a conditioned email service-linked role |
 | AWS Budget | Account-level budget and tag reads | Account-level CodeHawks budget lifecycle and its conditioned service-linked role |
