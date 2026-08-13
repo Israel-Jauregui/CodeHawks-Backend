@@ -766,8 +766,8 @@ resource "aws_apigatewayv2_route" "authenticated" {
 
 # A browser preflight never includes the bearer token used by the eventual
 # request. This method-specific route must outrank the authenticated ANY route
-# so API Gateway can return its configured CORS response without invoking the
-# JWT authorizer.
+# so the Lambda integration can answer the preflight before parsing an identity;
+# API Gateway then adds its configured CORS response headers.
 resource "aws_apigatewayv2_route" "cors_preflight" {
   api_id             = aws_apigatewayv2_api.api.id
   authorization_type = "NONE"
