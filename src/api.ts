@@ -123,6 +123,10 @@ function publicRoutes(
   const path = event.rawPath.replace(/\/$/, '') || '/';
   const query = event.queryStringParameters ?? {};
 
+  if (method === 'OPTIONS' && (path === '/v1' || path.startsWith('/v1/'))) {
+    return Promise.resolve(noContent());
+  }
+
   if (method === 'GET' && path === '/health') {
     return Promise.resolve(
       json(200, {

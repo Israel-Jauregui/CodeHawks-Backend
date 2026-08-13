@@ -120,6 +120,16 @@ const team: Team = {
 };
 
 describe('API', () => {
+  it('handles CORS preflight without touching DynamoDB or authentication', async () => {
+    const ensureMember = vi.fn();
+    const repository = { ensureMember } as unknown as ClubRepository;
+    const response = await createApi({ config, repository })(event('/v1/me', 'OPTIONS'));
+
+    expect(response.statusCode).toBe(204);
+    expect(ensureMember).not.toHaveBeenCalled();
+    expect(response.body).toBeUndefined();
+  });
+
   it('serves health without touching DynamoDB or authentication', async () => {
     const ensureMember = vi.fn();
     const repository = { ensureMember } as unknown as ClubRepository;
