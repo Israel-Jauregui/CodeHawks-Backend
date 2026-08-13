@@ -764,6 +764,17 @@ resource "aws_apigatewayv2_route" "authenticated" {
   target               = "integrations/${aws_apigatewayv2_integration.api.id}"
 }
 
+# A browser preflight never includes the bearer token used by the eventual
+# request. This method-specific route must outrank the authenticated ANY route
+# so API Gateway can return its configured CORS response without invoking the
+# JWT authorizer.
+resource "aws_apigatewayv2_route" "cors_preflight" {
+  api_id             = aws_apigatewayv2_api.api.id
+  authorization_type = "NONE"
+  route_key          = "OPTIONS /v1/{proxy+}"
+  target             = "integrations/${aws_apigatewayv2_integration.api.id}"
+}
+
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.api.id
   auto_deploy = true
