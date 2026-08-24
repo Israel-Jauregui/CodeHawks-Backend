@@ -5,7 +5,7 @@ Terraform provisions:
 - one on-demand DynamoDB table with two sparse GSIs, TTL, AWS-owned encryption, PITR, and deletion protection
 - one ARM64 Node.js 22 API Lambda with least-privilege DynamoDB/log/media-write IAM
 - one API Gateway HTTP API with exact-origin CORS, public reads, JWT authorization for protected `/v1/*`, access logs, and throttling
-- one private S3 media bucket and CloudFront distribution with origin access control
+- one private S3 media bucket with one-day pending-upload cleanup and a CloudFront distribution whose origin access excludes pending keys and disables avatar caching
 - one encrypted SQS newsletter queue, dead-letter queue, batch-one worker Lambda, SES domain identity with Easy DKIM, and configuration set with bounce/complaint suppression
 - in `entra` mode: an authorizer pinned to the UNG issuer and our external multitenant API audience/scope
 - in `cognito` mode: an Essentials passwordless email-OTP user pool/client and a small domain/token-claims Lambda; email delivery uses the supplied SES identity
@@ -75,7 +75,7 @@ AUTH_PROVIDER="entra" \
 ENTRA_API_CLIENT_ID="00000000-0000-0000-0000-000000000000" \
 SES_DOMAIN="codehawks.org" \
 EMAIL_FROM_ADDRESS="CodeHawks <noreply@codehawks.org>" \
-EMAIL_REPLY_TO_ADDRESS="officers@codehawks.org" \
+EMAIL_REPLY_TO_ADDRESS="contact@codehawks.org" \
 ALLOWED_ORIGINS='["https://codehawks.org","https://www.codehawks.org"]' \
 ./infrastructure/scripts/configure-backend-deployment.sh
 ```
@@ -102,9 +102,9 @@ Rerun the same workflow with `operation=plan-and-apply`. It creates a fresh plan
 
 Reject the environment deployment if the plan is wrong. No AWS apply runs automatically on a push or pull request.
 
-After the first successful apply, copy the exact JSON array under **SES DNS handoff** in the run summary into the frontend repository's `infrastructure-production` GitHub environment variable named `SES_DKIM_TOKENS`. It is the raw `ses_dkim_tokens_json` output, without Terraform's display escaping. Run and approve the frontend **Apply infrastructure** workflow; its domain-owning Terraform state creates the three unproxied Cloudflare CNAMEs. Wait for SES identity verification and DKIM status to become successful, then have the human owner request SES production access in this same AWS region. Do not create the SES identity or DNS records manually.
+After the first successful apply, copy the exact JSON array under **SES DNS handoff** in the run summary into the frontend repository's `infrastructure-production` GitHub environment variable named `SES_DKIM_TOKENS`. It is the raw `ses_dkim_tokens_json` output, without Terraform's display escaping. Use the frontend **Plan or apply infrastructure** workflow and approve its exact reviewed plan; its domain-owning Terraform state creates the three unproxied Cloudflare CNAMEs. Wait for SES identity verification and DKIM status to become successful, then have the human owner request SES production access in this same AWS region. Do not create the SES identity or DNS records manually.
 
-Then copy `api_url`, the selected authentication outputs, and `media_public_base_url` into the frontend integration. Sign in once as the intended first President, then use the one-time role command in [`../docs/bootstrap.md`](../docs/bootstrap.md).
+Then copy `api_url`, the selected authentication outputs, `media_public_base_url`, and the non-sensitive `media_upload_origin` into the frontend integration. `media_upload_origin` is the exact S3 origin the frontend CSP must allow for presigned browser POSTs; do not infer it from a sample upload response. Sign in once as the intended first President, then use the one-time role command in [`../docs/bootstrap.md`](../docs/bootstrap.md).
 
 ## Local validation
 

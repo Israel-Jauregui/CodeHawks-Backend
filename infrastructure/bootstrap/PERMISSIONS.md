@@ -10,13 +10,22 @@ The bootstrap has three permission boundaries with deliberately different jobs:
 - `RuntimePermissionsBoundary` limits the application Lambda roles and contains
   no infrastructure-administration permissions.
 
+The runtime boundary permits DynamoDB `DeleteItem` so the API can erase indexed
+personal records and the newsletter worker can release a failed delivery claim.
+For media, runtime roles may put/get/delete objects only in the represented
+pending/final avatar, event, project, and team prefixes in the one backend media
+bucket. `ListBucket` is separately limited to final and pending avatar prefixes
+so account deletion can remove every attributable avatar upload without
+enumerating club-resource media. Terraform narrows these maximum permissions
+further per Lambda role.
+
 ## Terraform lifecycle coverage
 
 | Terraform surface | Plan refresh coverage | Apply lifecycle coverage |
 | --- | --- | --- |
 | Terraform state and plan bundle | Exact state bucket keys and prefixes | Exact state bucket keys and prefixes |
 | DynamoDB table and indexes | Describe, recovery, TTL, insights, and tags on the CodeHawks table | Table and index lifecycle on the CodeHawks table ARNs |
-| Media S3 bucket and policy | Read/list on the named media bucket | Bucket lifecycle on the named media bucket and its objects |
+| Media S3 bucket, pending lifecycle, and policy | Read/list on the named media bucket | Bucket/lifecycle/policy lifecycle on the named media bucket and its objects |
 | Lambda functions and permissions | Function get/list/tag reads on `codehawks-production-*` | Function lifecycle on `codehawks-production-*` |
 | Newsletter event-source mapping | List globally; get/tags on regional mapping ARNs | Create only when `lambda:FunctionArn` matches the CodeHawks prefix; mapping lifecycle on regional mapping ARNs |
 | CloudWatch Logs groups | Describe globally; tags on named CodeHawks groups | Log-group lifecycle on named CodeHawks groups |

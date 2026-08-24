@@ -85,6 +85,7 @@ jobs:
             TF_VAR_auth_provider
             TF_VAR_ses_domain
             TF_VAR_email_from_address
+            TF_VAR_email_reply_to_address
             TF_VAR_allowed_origins
             TF_VAR_runtime_permissions_boundary_arn
           )
@@ -101,6 +102,7 @@ jobs:
           [[ "$AWS_PLAN_ROLE_ARN" == "arn:aws:iam::${AWS_ACCOUNT_ID}:role/codehawks-backend-terraform-plan" ]]
           [[ "$TF_STATE_BUCKET" == "codehawks-backend-terraform-state-${AWS_ACCOUNT_ID}" ]]
           [[ "$TF_VAR_ses_domain" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]
+          [[ "$TF_VAR_email_reply_to_address" == "contact@${TF_VAR_ses_domain}" ]]
           [[ "$TF_VAR_runtime_permissions_boundary_arn" == "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/codehawks-backend-runtime-boundary" ]]
           [[ "$TF_VAR_auth_provider" == "entra" || "$TF_VAR_auth_provider" == "cognito" ]]
           jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and startswith("https://"))' \

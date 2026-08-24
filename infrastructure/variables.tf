@@ -77,6 +77,14 @@ variable "email_reply_to_address" {
   type        = string
   default     = null
   nullable    = true
+
+  validation {
+    condition = (
+      var.email_reply_to_address == null ||
+      can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.email_reply_to_address))
+    )
+    error_message = "email_reply_to_address must be a valid email address when supplied."
+  }
 }
 
 variable "allowed_email_domain" {
