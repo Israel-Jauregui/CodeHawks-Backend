@@ -8,7 +8,7 @@ describe('SesNewsletterEmailSender', () => {
     const send = vi.fn().mockResolvedValue({ MessageId: 'message-id' });
     const sender = new SesNewsletterEmailSender(
       'CodeHawks <noreply@codehawks.org>',
-      'officers@codehawks.org',
+      'contact@codehawks.org',
       'codehawks-production',
       { send } as unknown as SESv2Client,
     );
@@ -22,7 +22,7 @@ describe('SesNewsletterEmailSender', () => {
       subject: 'Club update',
     } as Newsletter;
 
-    await sender.sendNewsletter(newsletter, recipient);
+    await expect(sender.sendNewsletter(newsletter, recipient)).resolves.toBe('message-id');
 
     const command = send.mock.calls[0]?.[0] as { input: SendEmailCommandInput };
     expect(command.input.Destination?.ToAddresses).toEqual(['member@ung.edu']);
@@ -30,5 +30,8 @@ describe('SesNewsletterEmailSender', () => {
       '&lt;script&gt;alert(1)&lt;/script&gt;',
     );
     expect(command.input.Content?.Simple?.Body?.Html?.Data).not.toContain('<script>');
+    expect(command.input.Content?.Simple?.Body?.Text?.Data).toContain(
+      'turn off Newsletter announcements',
+    );
   });
 });

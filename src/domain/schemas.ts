@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { CLUB_ROLES } from './entities.js';
+import { isAllowedProfileUrl } from './profile-links.js';
 
 const httpsUrl = z
   .string()
@@ -7,6 +8,28 @@ const httpsUrl = z
   .max(2048)
   .refine((value) => new URL(value).protocol === 'https:', 'URL must use HTTPS.');
 const optionalUrl = httpsUrl.optional();
+const optionalGithubUrl = httpsUrl
+  .refine(
+    (value) => isAllowedProfileUrl(value, 'github'),
+    'GitHub URL must use the github.com domain.',
+  )
+  .optional();
+const optionalLinkedinUrl = httpsUrl
+  .refine(
+    (value) => isAllowedProfileUrl(value, 'linkedin'),
+    'LinkedIn URL must use the linkedin.com domain.',
+  )
+  .optional();
+export const memberHandleSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(3)
+  .max(40)
+  .regex(
+    /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])$/,
+    'Handle must start and end with a letter or number and use only letters, numbers, underscores, or hyphens.',
+  );
 const memberTechStack = z
   .array(z.string().trim().min(1).max(50))
   .max(25)
@@ -25,10 +48,13 @@ export const memberProfilePatchSchema = z
     avatarUrl: optionalUrl.nullable(),
     bio: z.string().trim().max(800).nullable().optional(),
     displayName: z.string().trim().min(1).max(100).optional(),
-    githubUrl: optionalUrl.nullable(),
-    linkedinUrl: optionalUrl.nullable(),
+    githubUrl: optionalGithubUrl.nullable(),
+    linkedinUrl: optionalLinkedinUrl.nullable(),
     major: z.string().trim().max(120).nullable().optional(),
+    handle: memberHandleSchema.optional(),
+    isPublicProfile: z.boolean().optional(),
     minors: z.array(z.string().trim().min(1).max(120)).max(4).optional(),
+    newsletterOptIn: z.boolean().optional(),
     techStack: memberTechStack.optional(),
   })
   .strict();
@@ -37,6 +63,17 @@ export const imageUploadSchema = z
   .object({
     contentType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
     fileSize: z.number().int().positive().max(5 * 1024 * 1024),
+  })
+  .strict();
+
+export const imageUploadFinalizeSchema = z
+  .object({
+    uploadId: z
+      .string()
+      .regex(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp)$/,
+        'uploadId must be an image upload identifier issued by the CodeHawks media service.',
+      ),
   })
   .strict();
 
@@ -157,3 +194,20 @@ export const createNewsletterSchema = z
       .refine((value) => !value.includes('\r') && !value.includes('\n'), 'Subject must be one line.'),
   })
   .strict();
+
+export const newsletterDeliveryReconciliationSchema = z
+  .object({
+    acknowledgePossibleDuplicate: z.boolean().optional(),
+    reason: z.string().trim().min(5).max(500),
+    resolution: z.enum(['mark_sent', 'mark_skipped', 'retry']),
+  })
+  .strict()
+  .superRefine((input, context) => {
+    if (input.resolution === 'retry' && input.acknowledgePossibleDuplicate !== true) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Retry requires acknowledgePossibleDuplicate=true.',
+        path: ['acknowledgePossibleDuplicate'],
+      });
+    }
+  });

@@ -4,6 +4,7 @@ import { forbidden } from '../lib/errors.js';
 export const PERMISSIONS = [
   'events.manage',
   'members.manage',
+  'newsletters.reconcile',
   'newsletters.send',
   'projects.manage',
   'roles.manage',
@@ -21,6 +22,7 @@ const ROLE_PERMISSIONS: Readonly<Record<ClubRole, ReadonlySet<Permission>>> = {
   vice_president: new Set([
     'events.manage',
     'members.manage',
+    'newsletters.reconcile',
     'newsletters.send',
     'projects.manage',
     'teams.manage',

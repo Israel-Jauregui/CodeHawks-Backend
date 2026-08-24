@@ -13,6 +13,7 @@ import {
 import type { AppConfig } from './config.js';
 import {
   toPublicEvent,
+  toPublicDirectoryMember,
   toPublicMember,
   toPublicProject,
   toPublicTeam,
@@ -26,11 +27,13 @@ import {
   createNewsletterSchema,
   createProjectSchema,
   createTeamSchema,
+  imageUploadFinalizeSchema,
   imageUploadSchema,
   inviteMemberSchema,
   memberAdministrationSchema,
   memberProfilePatchSchema,
   membershipStatusSchema,
+  newsletterDeliveryReconciliationSchema,
   notificationReadSchema,
   projectStatusSchema,
   respondToInvitationSchema,
@@ -110,14 +113,43 @@ async function requireEvent(repository: ClubRepository, eventId: string): Promis
 }
 
 function assertActive(member: Member, path: string, method: string): void {
-  if (member.status === 'suspended' && !(path === '/v1/me' && method === 'GET')) {
+  const privacyRoute =
+    (path === '/v1/me' && (method === 'GET' || method === 'DELETE')) ||
+    (path === '/v1/me/export' && method === 'GET');
+  if (member.status === 'suspended' && !privacyRoute) {
     throw forbidden('This club account is suspended.');
+  }
+}
+
+function isManagedMediaUrl(
+  value: string,
+  config: AppConfig,
+  expectedKeyPrefix: string,
+): boolean {
+  try {
+    const base = new URL(config.mediaPublicBaseUrl);
+    const candidate = new URL(value);
+    const basePath = base.pathname.replace(/\/$/, '');
+    const requiredPathPrefix = `${basePath}/`.replace(/^\/\//, '/');
+    const expectedPathPrefix = `${requiredPathPrefix}${expectedKeyPrefix}`;
+    return !(
+      candidate.protocol !== 'https:' ||
+      candidate.origin !== base.origin ||
+      !candidate.pathname.startsWith(expectedPathPrefix) ||
+      candidate.username !== '' ||
+      candidate.password !== '' ||
+      candidate.search !== '' ||
+      candidate.hash !== ''
+    );
+  } catch {
+    return false;
   }
 }
 
 function publicRoutes(
   event: ApiEvent,
   repository: ClubRepository,
+  config: AppConfig,
 ): Promise<APIGatewayProxyStructuredResultV2 | undefined> {
   const method = event.requestContext.http.method;
   const path = event.rawPath.replace(/\/$/, '') || '/';
@@ -138,23 +170,59 @@ function publicRoutes(
   if (method === 'GET' && path === '/v1/projects') {
     return repository.listProjects(parseLimit(query.limit), query.cursor).then((page) =>
       json(200, {
-        data: page.items.map(toPublicProject),
+        data: page.items.map((project) => {
+          const publicProject = toPublicProject(project);
+          return publicProject.imageUrl &&
+            !isManagedMediaUrl(publicProject.imageUrl, config, `projects/${project.id}/`)
+            ? { ...publicProject, imageUrl: undefined }
+            : publicProject;
+        }),
         meta: { nextCursor: page.nextCursor ?? null },
       }),
     );
+  }
+
+  if (method === 'GET' && path === '/v1/directory/members') {
+    return repository
+      .listPublicDirectoryMembers(parseLimit(query.limit), query.cursor)
+      .then((page) =>
+        json(200, {
+          data: page.items.map((member) => {
+            const publicMember = toPublicDirectoryMember(member);
+            return publicMember.avatarUrl &&
+              !isManagedMediaUrl(publicMember.avatarUrl, config, `avatars/${member.id}/`)
+              ? { ...publicMember, avatarUrl: undefined }
+              : publicMember;
+          }),
+          meta: { nextCursor: page.nextCursor ?? null },
+        }),
+      );
   }
   const projectMatch = pathMatch(path, /^\/v1\/projects\/([0-9a-f-]+)$/i);
   if (method === 'GET' && projectMatch?.[1]) {
     return requireProject(repository, projectMatch[1]).then((project) => {
       if (project.status !== 'published') throw notFound('Project');
-      return json(200, { data: toPublicProject(project) });
+      const publicProject = toPublicProject(project);
+      return json(200, {
+        data:
+          publicProject.imageUrl &&
+          !isManagedMediaUrl(publicProject.imageUrl, config, `projects/${project.id}/`)
+            ? { ...publicProject, imageUrl: undefined }
+            : publicProject,
+      });
     });
   }
 
   if (method === 'GET' && path === '/v1/teams') {
     return repository.listTeams(parseLimit(query.limit), query.cursor).then((page) =>
       json(200, {
-        data: page.items.map(toPublicTeam),
+        data: page.items.map((team) => {
+          const publicTeam = toPublicTeam(team);
+          return publicTeam.imageUrl &&
+            !isManagedMediaUrl(publicTeam.imageUrl, config, `teams/${team.id}/`)
+            ? { ...publicTeam, imageUrl: undefined }
+            : publicTeam;
+        }),
         meta: { nextCursor: page.nextCursor ?? null },
       }),
     );
@@ -163,14 +231,27 @@ function publicRoutes(
   if (method === 'GET' && teamMatch?.[1]) {
     return requireTeam(repository, teamMatch[1]).then((team) => {
       if (team.status === 'archived') throw notFound('Team');
-      return json(200, { data: toPublicTeam(team) });
+      const publicTeam = toPublicTeam(team);
+      return json(200, {
+        data:
+          publicTeam.imageUrl &&
+          !isManagedMediaUrl(publicTeam.imageUrl, config, `teams/${team.id}/`)
+            ? { ...publicTeam, imageUrl: undefined }
+            : publicTeam,
+      });
     });
   }
 
   if (method === 'GET' && path === '/v1/events') {
     return repository.listEvents(parseLimit(query.limit), query.cursor).then((page) =>
       json(200, {
-        data: page.items.map(toPublicEvent),
+        data: page.items.map((clubEvent) => {
+          const publicEvent = toPublicEvent(clubEvent);
+          return publicEvent.imageUrl &&
+            !isManagedMediaUrl(publicEvent.imageUrl, config, `events/${clubEvent.id}/`)
+            ? { ...publicEvent, imageUrl: undefined }
+            : publicEvent;
+        }),
         meta: { nextCursor: page.nextCursor ?? null },
       }),
     );
@@ -179,7 +260,14 @@ function publicRoutes(
   if (method === 'GET' && eventMatch?.[1]) {
     return requireEvent(repository, eventMatch[1]).then((clubEvent) => {
       if (!clubEvent.published) throw notFound('Event');
-      return json(200, { data: toPublicEvent(clubEvent) });
+      const publicEvent = toPublicEvent(clubEvent);
+      return json(200, {
+        data:
+          publicEvent.imageUrl &&
+          !isManagedMediaUrl(publicEvent.imageUrl, config, `events/${clubEvent.id}/`)
+            ? { ...publicEvent, imageUrl: undefined }
+            : publicEvent,
+      });
     });
   }
 
@@ -202,7 +290,47 @@ async function authenticatedRoutes(
   }
   if (path === '/v1/me' && method === 'PATCH') {
     const input = parseBody(event, memberProfilePatchSchema);
+    if (input.avatarUrl !== undefined) {
+      throw badRequest(
+        'Use the avatar upload finalization route to attach an avatar or DELETE /v1/me/avatar to remove it.',
+      );
+    }
     return json(200, { data: await repository.updateMemberProfile(actor, input) });
+  }
+  if (path === '/v1/me/export' && method === 'GET') {
+    return json(200, { data: await repository.exportMemberData(actor.id) });
+  }
+  if (path === '/v1/me' && method === 'DELETE') {
+    if (mediaService) await mediaService.deleteMemberAvatar(actor);
+    await repository.deleteMemberPersonalData(actor);
+    if (mediaService) await mediaService.deleteMemberAvatar(actor);
+    return noContent();
+  }
+  if (path === '/v1/me/avatar' && method === 'DELETE') {
+    if (!mediaService) throw new Error('The media service is not configured.');
+    const updated = await repository.updateMemberAvatar(actor, null);
+    if (!actor.avatarUrl) return json(200, { data: updated });
+    try {
+      await mediaService.deleteManagedImage(actor.avatarUrl, `avatars/${actor.id}/`);
+    } catch (error) {
+      try {
+        await repository.updateMemberAvatar(updated, actor.avatarUrl);
+      } catch (restoreError) {
+        console.error(
+          JSON.stringify({
+            error:
+              restoreError instanceof Error
+                ? { message: restoreError.message, name: restoreError.name }
+                : 'Unknown avatar restore error',
+            level: 'error',
+            memberId: actor.id,
+            operation: 'restore-avatar-after-delete-failure',
+          }),
+        );
+      }
+      throw error;
+    }
+    return json(200, { data: updated });
   }
   if (path === '/v1/me/avatar-upload' && method === 'POST') {
     if (!mediaService) {
@@ -210,6 +338,39 @@ async function authenticatedRoutes(
     }
     const input = parseBody(event, imageUploadSchema);
     return json(201, { data: await mediaService.createAvatarUpload(actor, input) });
+  }
+  if (path === '/v1/me/avatar-upload/finalize' && method === 'POST') {
+    if (!mediaService) throw new Error('The media service is not configured.');
+    const { uploadId } = parseBody(event, imageUploadFinalizeSchema);
+    const finalized = await mediaService.finalizeAvatarUpload(actor, uploadId);
+    if (!finalized) {
+      throw badRequest('The pending avatar is missing, expired, or not a supported image.');
+    }
+    let updated: Member;
+    try {
+      updated = await repository.updateMemberAvatar(actor, finalized.publicUrl);
+    } catch (error) {
+      await mediaService.deleteManagedImage(finalized.publicUrl, `avatars/${actor.id}/`);
+      throw error;
+    }
+    if (actor.avatarUrl && actor.avatarUrl !== finalized.publicUrl) {
+      try {
+        await mediaService.deleteManagedImage(actor.avatarUrl, `avatars/${actor.id}/`);
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            error:
+              error instanceof Error
+                ? { message: error.message, name: error.name }
+                : 'Unknown avatar cleanup error',
+            level: 'error',
+            memberId: actor.id,
+            operation: 'delete-replaced-avatar',
+          }),
+        );
+      }
+    }
+    return json(200, { data: updated });
   }
   if (path === '/v1/me/notifications' && method === 'GET') {
     const page = await repository.listMemberNotifications(
@@ -239,7 +400,11 @@ async function authenticatedRoutes(
   }
 
   if (path === '/v1/members' && method === 'GET') {
-    const page = await repository.listMembers(query.search ?? '', parseLimit(query.limit), query.cursor);
+    const search = query.search?.trim() ?? '';
+    if (search.length < 3) {
+      throw badRequest('search must contain at least 3 characters.');
+    }
+    const page = await repository.listMembers(search, parseLimit(query.limit), query.cursor);
     return json(200, {
       data: page.items.map(toPublicMember),
       meta: { nextCursor: page.nextCursor ?? null },
@@ -353,6 +518,68 @@ async function authenticatedRoutes(
     return json(200, { data: newsletter });
   }
 
+  const newsletterDeliveriesMatch = pathMatch(
+    path,
+    /^\/v1\/newsletters\/([0-9a-f-]+)\/deliveries$/i,
+  );
+  if (newsletterDeliveriesMatch?.[1] && method === 'GET') {
+    requirePermission(actor, 'newsletters.reconcile');
+    const newsletter = await repository.getNewsletter(newsletterDeliveriesMatch[1]);
+    if (!newsletter) throw notFound('Newsletter');
+    const page = await repository.listNewsletterDeliveries(
+      newsletter.id,
+      parseLimit(query.limit),
+      query.cursor,
+    );
+    return json(200, {
+      data: page.items,
+      meta: { nextCursor: page.nextCursor ?? null },
+    });
+  }
+
+  const newsletterReconciliationMatch = pathMatch(
+    path,
+    /^\/v1\/newsletters\/([0-9a-f-]+)\/deliveries\/([0-9a-f-]+)\/reconcile$/i,
+  );
+  if (
+    newsletterReconciliationMatch?.[1] &&
+    newsletterReconciliationMatch[2] &&
+    method === 'POST'
+  ) {
+    requirePermission(actor, 'newsletters.reconcile');
+    const newsletter = await repository.getNewsletter(newsletterReconciliationMatch[1]);
+    if (!newsletter) throw notFound('Newsletter');
+    const reconciliation = parseBody(event, newsletterDeliveryReconciliationSchema);
+    if (reconciliation.resolution === 'retry' && !newsletterQueue) {
+      throw new Error('The newsletter queue is not configured.');
+    }
+    let updated = await repository.reconcileNewsletterDelivery(
+      newsletter.id,
+      newsletterReconciliationMatch[2],
+      reconciliation,
+      actor,
+    );
+    if (reconciliation.resolution === 'retry') {
+      await newsletterQueue?.enqueueDeliveries(newsletter.id, [newsletterReconciliationMatch[2]]);
+      return json(202, { data: updated });
+    }
+    if (
+      updated.status === 'sending' &&
+      updated.fanoutComplete &&
+      updated.processedCount >= updated.recipientCount
+    ) {
+      try {
+        updated = await repository.updateNewsletterStatus(updated.id, 'sending', 'sent');
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'conflict') throw error;
+        const current = await repository.getNewsletter(updated.id);
+        if (!current || current.status !== 'sent') throw error;
+        updated = current;
+      }
+    }
+    return json(200, { data: updated });
+  }
+
   const newsletterRetryMatch = pathMatch(
     path,
     /^\/v1\/newsletters\/([0-9a-f-]+)\/retry$/i,
@@ -389,11 +616,14 @@ async function authenticatedRoutes(
       ...(input.role === undefined ? {} : { role: input.role }),
       ...(input.status === undefined ? {} : { status: input.status }),
     };
-    return json(200, { data: await repository.administerMember(target.id, changes) });
+    return json(200, { data: await repository.administerMember(target.id, changes, actor) });
   }
 
   if (path === '/v1/projects' && method === 'POST') {
     const input = parseBody(event, createProjectSchema);
+    if (input.imageUrl !== undefined) {
+      throw badRequest('Create the project before attaching an uploaded image.');
+    }
     return json(201, { data: await repository.createProject(actor, input) });
   }
   const projectMatch = pathMatch(path, /^\/v1\/projects\/([0-9a-f-]+)$/i);
@@ -401,6 +631,9 @@ async function authenticatedRoutes(
     const project = await requireProject(repository, projectMatch[1]);
     requireOwnerOrPermission(actor, project.ownerId, 'projects.manage');
     const input = parseBody(event, updateProjectSchema);
+    if (typeof input.imageUrl === 'string') {
+      throw badRequest('Use the project image-upload finalization route to attach an image.');
+    }
     if (input.status === 'published' && !hasPermission(actor, 'projects.manage')) {
       throw forbidden('An officer must publish a project.');
     }
@@ -424,6 +657,32 @@ async function authenticatedRoutes(
     return json(201, {
       data: await mediaService.createResourceImageUpload('project', project.id, input),
     });
+  }
+  const projectImageFinalizeMatch = pathMatch(
+    path,
+    /^\/v1\/projects\/([0-9a-f-]+)\/image-upload\/finalize$/i,
+  );
+  if (projectImageFinalizeMatch?.[1] && method === 'POST') {
+    if (!mediaService) throw new Error('The media service is not configured.');
+    const project = await requireProject(repository, projectImageFinalizeMatch[1]);
+    requireOwnerOrPermission(actor, project.ownerId, 'projects.manage');
+    const { uploadId } = parseBody(event, imageUploadFinalizeSchema);
+    const finalized = await mediaService.finalizeResourceImageUpload(
+      'project',
+      project.id,
+      uploadId,
+    );
+    if (!finalized) {
+      throw badRequest('The pending project image is missing, expired, or not a supported image.');
+    }
+    try {
+      return json(200, {
+        data: await repository.updateProject(project, { imageUrl: finalized.publicUrl }),
+      });
+    } catch (error) {
+      await mediaService.deleteManagedImage(finalized.publicUrl, `projects/${project.id}/`);
+      throw error;
+    }
   }
   if (projectMatch?.[1] && method === 'DELETE') {
     const project = await requireProject(repository, projectMatch[1]);
@@ -597,6 +856,9 @@ async function authenticatedRoutes(
 
   if (path === '/v1/teams' && method === 'POST') {
     const input = parseBody(event, createTeamSchema);
+    if (input.imageUrl !== undefined) {
+      throw badRequest('Create the team before attaching an uploaded image.');
+    }
     return json(201, { data: await repository.createTeam(actor, input) });
   }
   const teamMatch = pathMatch(path, /^\/v1\/teams\/([0-9a-f-]+)$/i);
@@ -604,6 +866,9 @@ async function authenticatedRoutes(
     const team = await requireTeam(repository, teamMatch[1]);
     requireOwnerOrPermission(actor, team.ownerId, 'teams.manage');
     const input = parseBody(event, updateTeamSchema);
+    if (typeof input.imageUrl === 'string') {
+      throw badRequest('Use the team image-upload finalization route to attach an image.');
+    }
     if (input.maxMembers !== undefined && input.maxMembers < team.memberCount) {
       throw badRequest('maxMembers cannot be lower than the current member count.');
     }
@@ -627,6 +892,32 @@ async function authenticatedRoutes(
     return json(201, {
       data: await mediaService.createResourceImageUpload('team', team.id, input),
     });
+  }
+  const teamImageFinalizeMatch = pathMatch(
+    path,
+    /^\/v1\/teams\/([0-9a-f-]+)\/image-upload\/finalize$/i,
+  );
+  if (teamImageFinalizeMatch?.[1] && method === 'POST') {
+    if (!mediaService) throw new Error('The media service is not configured.');
+    const team = await requireTeam(repository, teamImageFinalizeMatch[1]);
+    requireOwnerOrPermission(actor, team.ownerId, 'teams.manage');
+    const { uploadId } = parseBody(event, imageUploadFinalizeSchema);
+    const finalized = await mediaService.finalizeResourceImageUpload(
+      'team',
+      team.id,
+      uploadId,
+    );
+    if (!finalized) {
+      throw badRequest('The pending team image is missing, expired, or not a supported image.');
+    }
+    try {
+      return json(200, {
+        data: await repository.updateTeam(team, { imageUrl: finalized.publicUrl }),
+      });
+    } catch (error) {
+      await mediaService.deleteManagedImage(finalized.publicUrl, `teams/${team.id}/`);
+      throw error;
+    }
   }
   if (teamMatch?.[1] && method === 'DELETE') {
     const team = await requireTeam(repository, teamMatch[1]);
@@ -771,13 +1062,20 @@ async function authenticatedRoutes(
 
   if (path === '/v1/events' && method === 'POST') {
     requirePermission(actor, 'events.manage');
-    return json(201, { data: await repository.createEvent(actor, parseBody(event, createEventSchema)) });
+    const input = parseBody(event, createEventSchema);
+    if (input.imageUrl !== undefined) {
+      throw badRequest('Create the event before attaching an uploaded image.');
+    }
+    return json(201, { data: await repository.createEvent(actor, input) });
   }
   const eventMatch = pathMatch(path, /^\/v1\/events\/([0-9a-f-]+)$/i);
   if (eventMatch?.[1] && method === 'PATCH') {
     requirePermission(actor, 'events.manage');
     const clubEvent = await requireEvent(repository, eventMatch[1]);
     const input = parseBody(event, updateEventSchema);
+    if (typeof input.imageUrl === 'string') {
+      throw badRequest('Use the event image-upload finalization route to attach an image.');
+    }
     const startsAt = input.startsAt ?? clubEvent.startsAt;
     const endsAt = input.endsAt ?? clubEvent.endsAt;
     if (Date.parse(endsAt) <= Date.parse(startsAt)) {
@@ -789,6 +1087,45 @@ async function authenticatedRoutes(
   if (eventManageMatch?.[1] && method === 'GET') {
     requirePermission(actor, 'events.manage');
     return json(200, { data: await requireEvent(repository, eventManageMatch[1]) });
+  }
+  const eventImageUploadMatch = pathMatch(
+    path,
+    /^\/v1\/events\/([0-9a-f-]+)\/image-upload$/i,
+  );
+  if (eventImageUploadMatch?.[1] && method === 'POST') {
+    requirePermission(actor, 'events.manage');
+    if (!mediaService) throw new Error('The media service is not configured.');
+    const clubEvent = await requireEvent(repository, eventImageUploadMatch[1]);
+    const input = parseBody(event, imageUploadSchema);
+    return json(201, {
+      data: await mediaService.createResourceImageUpload('event', clubEvent.id, input),
+    });
+  }
+  const eventImageFinalizeMatch = pathMatch(
+    path,
+    /^\/v1\/events\/([0-9a-f-]+)\/image-upload\/finalize$/i,
+  );
+  if (eventImageFinalizeMatch?.[1] && method === 'POST') {
+    requirePermission(actor, 'events.manage');
+    if (!mediaService) throw new Error('The media service is not configured.');
+    const clubEvent = await requireEvent(repository, eventImageFinalizeMatch[1]);
+    const { uploadId } = parseBody(event, imageUploadFinalizeSchema);
+    const finalized = await mediaService.finalizeResourceImageUpload(
+      'event',
+      clubEvent.id,
+      uploadId,
+    );
+    if (!finalized) {
+      throw badRequest('The pending event image is missing, expired, or not a supported image.');
+    }
+    try {
+      return json(200, {
+        data: await repository.updateEvent(clubEvent, { imageUrl: finalized.publicUrl }),
+      });
+    } catch (error) {
+      await mediaService.deleteManagedImage(finalized.publicUrl, `events/${clubEvent.id}/`);
+      throw error;
+    }
   }
   if (eventMatch?.[1] && method === 'DELETE') {
     requirePermission(actor, 'events.manage');
@@ -832,7 +1169,7 @@ export function createApi(dependencies: ApiDependencies) {
   return async (event: ApiEvent): Promise<APIGatewayProxyStructuredResultV2> => {
     const requestId = event.requestContext.requestId;
     try {
-      const publicResult = await publicRoutes(event, dependencies.repository);
+      const publicResult = await publicRoutes(event, dependencies.repository, dependencies.config);
       if (publicResult) return publicResult;
 
       const identity = identityFromEvent(

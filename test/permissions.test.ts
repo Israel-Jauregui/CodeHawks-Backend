@@ -11,8 +11,10 @@ function memberWithRole(role: ClubRole): Member {
     id: '',
     identityProvider: 'entra',
     identitySubject: '',
+    isPublicProfile: false,
     lastSeenAt: '',
     minors: [],
+    newsletterOptIn: false,
     role,
     status: 'active',
     techStack: [],
@@ -45,5 +47,14 @@ describe('role permissions', () => {
       expect(hasPermission(memberWithRole(role), 'newsletters.send')).toBe(true);
     }
     expect(hasPermission(memberWithRole('member'), 'newsletters.send')).toBe(false);
+  });
+
+  it('limits ambiguous-delivery reconciliation to the president and vice president', () => {
+    expect(hasPermission(memberWithRole('president'), 'newsletters.reconcile')).toBe(true);
+    expect(hasPermission(memberWithRole('vice_president'), 'newsletters.reconcile')).toBe(true);
+    expect(hasPermission(memberWithRole('treasurer'), 'newsletters.reconcile')).toBe(false);
+    expect(hasPermission(memberWithRole('reservation_designee'), 'newsletters.reconcile')).toBe(
+      false,
+    );
   });
 });

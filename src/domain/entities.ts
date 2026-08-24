@@ -1,3 +1,5 @@
+import { isAllowedProfileUrl } from './profile-links.js';
+
 export const CLUB_ROLES = [
   'member',
   'reservation_designee',
@@ -18,6 +20,8 @@ export interface Member {
   email: string;
   handle: string;
   displayName: string;
+  isPublicProfile: boolean;
+  newsletterOptIn: boolean;
   role: ClubRole;
   status: MemberStatus;
   bio?: string;
@@ -32,14 +36,34 @@ export interface Member {
   lastSeenAt: string;
 }
 
-export type PublicMember = Omit<
+export const CURRENT_PRIVACY_POLICY_VERSION = '2026-08-23-v1' as const;
+
+export interface MemberPreferenceAuditEntry {
+  id: string;
+  actorMemberId: string;
+  memberId: string;
+  changes: {
+    isPublicProfile?: { from: boolean; to: boolean };
+    newsletterOptIn?: { from: boolean; to: boolean };
+  };
+  createdAt: string;
+  policyVersion: typeof CURRENT_PRIVACY_POLICY_VERSION;
+  source: 'self_service_profile';
+}
+
+export type PublicMember = Pick<Member, 'displayName' | 'handle' | 'id'>;
+
+export type PublicDirectoryMember = Pick<
   Member,
-  | 'email'
-  | 'identityProvider'
-  | 'identitySubject'
-  | 'identityTenant'
-  | 'lastSeenAt'
-  | 'status'
+  | 'avatarUrl'
+  | 'bio'
+  | 'displayName'
+  | 'githubUrl'
+  | 'handle'
+  | 'linkedinUrl'
+  | 'major'
+  | 'minors'
+  | 'techStack'
 >;
 
 export type PublicationStatus = 'draft' | 'pending_review' | 'published' | 'archived';
@@ -60,7 +84,7 @@ export interface Project {
   updatedAt: string;
 }
 
-export type PublicProject = Omit<Project, 'memberIds' | 'ownerId'>;
+export type PublicProject = Omit<Project, 'memberHandles' | 'memberIds' | 'ownerId'>;
 
 export type TeamStatus = 'open' | 'closed' | 'archived';
 export type JoinPolicy = 'open' | 'approval_required';
@@ -83,7 +107,7 @@ export interface Team {
   updatedAt: string;
 }
 
-export type PublicTeam = Omit<Team, 'memberIds' | 'ownerId'>;
+export type PublicTeam = Omit<Team, 'memberHandles' | 'memberIds' | 'ownerId'>;
 
 export interface ClubEvent {
   id: string;
@@ -103,6 +127,7 @@ export interface ClubEvent {
 export type PublicClubEvent = Omit<ClubEvent, 'createdBy'>;
 
 export interface EventRsvp {
+  eventId?: string;
   memberId: string;
   memberHandle: string;
   status: 'going' | 'maybe';
@@ -125,6 +150,29 @@ export interface Newsletter {
   fanoutComplete: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export type NewsletterDeliveryOutcome =
+  | 'claimed'
+  | 'accepted_unconfirmed'
+  | 'retry_pending'
+  | 'sent'
+  | 'skipped'
+  | 'sending';
+
+export interface NewsletterDelivery {
+  memberId: string;
+  outcome: NewsletterDeliveryOutcome;
+  claimedAt?: string;
+  leaseExpiresAt?: string;
+  attemptStartedAt?: string;
+  completedAt?: string;
+  providerMessageId?: string;
+  reconciledAt?: string;
+  reconciledBy?: string;
+  reconciliationResolution?: 'mark_sent' | 'mark_skipped' | 'retry';
+  reconciliationReason?: string;
+  duplicateRiskAcknowledged?: boolean;
 }
 
 export type MembershipStatus = 'invited' | 'requested' | 'active' | 'rejected' | 'removed';
@@ -174,6 +222,17 @@ export interface MembershipAuditEntry {
   createdAt: string;
 }
 
+export interface MemberPrivacyExport {
+  eventRsvps: EventRsvp[];
+  generatedAt: string;
+  invitations: MembershipInvitation[];
+  limitations: string[];
+  memberships: ResourceMembership[];
+  notifications: Notification[];
+  preferenceHistory: MemberPreferenceAuditEntry[];
+  profile: Member;
+}
+
 export type NotificationType =
   | 'resource_join_requested'
   | 'resource_join_withdrawn'
@@ -210,25 +269,44 @@ export interface AuthenticatedIdentity {
 }
 
 export function toPublicMember(member: Member): PublicMember {
-  const {
-    email: _email,
-    identityProvider: _identityProvider,
-    identitySubject: _identitySubject,
-    identityTenant: _identityTenant,
-    lastSeenAt: _lastSeenAt,
-    status: _status,
-    ...publicMember
-  } = member;
-  return publicMember;
+  return { displayName: member.displayName, handle: member.handle, id: member.id };
+}
+
+export function toPublicDirectoryMember(member: Member): PublicDirectoryMember {
+  return {
+    ...(member.avatarUrl ? { avatarUrl: member.avatarUrl } : {}),
+    ...(member.bio ? { bio: member.bio } : {}),
+    displayName: member.displayName,
+    ...(member.githubUrl && isAllowedProfileUrl(member.githubUrl, 'github')
+      ? { githubUrl: member.githubUrl }
+      : {}),
+    handle: member.handle,
+    ...(member.linkedinUrl && isAllowedProfileUrl(member.linkedinUrl, 'linkedin')
+      ? { linkedinUrl: member.linkedinUrl }
+      : {}),
+    ...(member.major ? { major: member.major } : {}),
+    minors: member.minors,
+    techStack: member.techStack,
+  };
 }
 
 export function toPublicProject(project: Project): PublicProject {
-  const { memberIds: _memberIds, ownerId: _ownerId, ...publicProject } = project;
+  const {
+    memberHandles: _memberHandles,
+    memberIds: _memberIds,
+    ownerId: _ownerId,
+    ...publicProject
+  } = project;
   return publicProject;
 }
 
 export function toPublicTeam(team: Team): PublicTeam {
-  const { memberIds: _memberIds, ownerId: _ownerId, ...publicTeam } = team;
+  const {
+    memberHandles: _memberHandles,
+    memberIds: _memberIds,
+    ownerId: _ownerId,
+    ...publicTeam
+  } = team;
   return publicTeam;
 }
 

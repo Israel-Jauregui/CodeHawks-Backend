@@ -39,19 +39,49 @@ export class NewsletterWorker {
     const newsletter = await this.repository.getNewsletter(newsletterId);
     if (!newsletter) throw new Error('Newsletter metadata is missing.');
     if (newsletter.status === 'sent') return;
-    if (await this.repository.hasNewsletterDelivery(newsletterId, memberId)) return;
+    const claimToken = await this.repository.claimNewsletterDelivery(newsletterId, memberId);
+    if (!claimToken) return;
 
-    const recipient = await this.repository.getMember(memberId);
     let updated: Newsletter;
-    if (!recipient || recipient.status !== 'active') {
-      updated = await this.repository.recordNewsletterDelivery(
-        newsletterId,
-        memberId,
-        'skipped',
-      );
-    } else {
-      await this.emailSender.sendNewsletter(newsletter, recipient);
-      updated = await this.repository.recordNewsletterDelivery(newsletterId, memberId, 'sent');
+    let deliveryAttemptStarted = false;
+    try {
+      const recipient = await this.repository.getMember(memberId);
+      if (!recipient || recipient.status !== 'active' || !recipient.newsletterOptIn) {
+        updated = await this.repository.completeNewsletterDelivery(
+          newsletterId,
+          memberId,
+          'skipped',
+          claimToken,
+        );
+      } else {
+        if (
+          !(await this.repository.beginNewsletterDeliveryAttempt(
+            newsletterId,
+            memberId,
+            claimToken,
+          ))
+        ) {
+          throw new Error('The newsletter delivery lease expired or changed before send.');
+        }
+        deliveryAttemptStarted = true;
+        const providerMessageId = await this.emailSender.sendNewsletter(newsletter, recipient);
+        updated = await this.repository.completeNewsletterDelivery(
+          newsletterId,
+          memberId,
+          'sent',
+          claimToken,
+          providerMessageId,
+        );
+      }
+    } catch (error) {
+      if (!deliveryAttemptStarted) {
+        await this.repository.releaseNewsletterDeliveryClaim(
+          newsletterId,
+          memberId,
+          claimToken,
+        );
+      }
+      throw error;
     }
 
     if (

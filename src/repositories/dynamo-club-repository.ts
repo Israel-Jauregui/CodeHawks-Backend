@@ -9,6 +9,7 @@ import {
   TransactWriteCommand,
   UpdateCommand,
   type NativeAttributeValue,
+  type QueryCommandInput,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import type {
@@ -18,11 +19,14 @@ import type {
   EventRsvp,
   JoinRequestStatus,
   Member,
+  MemberPreferenceAuditEntry,
+  MemberPrivacyExport,
   MemberStatus,
   MembershipAuditEntry,
   MembershipInvitation,
   MembershipStatus,
   Newsletter,
+  NewsletterDelivery,
   NewsletterStatus,
   Notification,
   Page,
@@ -33,6 +37,7 @@ import type {
   Team,
   TeamStatus,
 } from '../domain/entities.js';
+import { CURRENT_PRIVACY_POLICY_VERSION } from '../domain/entities.js';
 import { badRequest, conflict, notFound } from '../lib/errors.js';
 import type {
   ClubRepository,
@@ -52,6 +57,8 @@ type ManagedResource = Project | Team;
 type TransactionItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
 type TransactionPut = NonNullable<TransactionItem['Put']>;
 type TransactionUpdate = NonNullable<TransactionItem['Update']>;
+
+const NEWSLETTER_DELIVERY_LEASE_MS = 5 * 60 * 1000;
 
 function now(): string {
   return new Date().toISOString();
@@ -111,6 +118,80 @@ function newsletterDeliveryKey(
   return {
     pk: key('NEWSLETTER', newsletterId),
     sk: key('DELIVERY', memberId),
+  };
+}
+
+function preferenceAuditPut(
+  tableName: string,
+  member: Member,
+  patch: UpdateMemberProfileInput,
+  timestamp: string,
+): TransactionPut | undefined {
+  const changes: MemberPreferenceAuditEntry['changes'] = {
+    ...(patch.isPublicProfile !== undefined &&
+    patch.isPublicProfile !== member.isPublicProfile
+      ? {
+          isPublicProfile: {
+            from: member.isPublicProfile,
+            to: patch.isPublicProfile,
+          },
+        }
+      : {}),
+    ...(patch.newsletterOptIn !== undefined &&
+    patch.newsletterOptIn !== member.newsletterOptIn
+      ? {
+          newsletterOptIn: {
+            from: member.newsletterOptIn,
+            to: patch.newsletterOptIn,
+          },
+        }
+      : {}),
+  };
+  if (Object.keys(changes).length === 0) return undefined;
+
+  const audit: MemberPreferenceAuditEntry = {
+    actorMemberId: member.id,
+    changes,
+    createdAt: timestamp,
+    id: randomUUID(),
+    memberId: member.id,
+    policyVersion: CURRENT_PRIVACY_POLICY_VERSION,
+    source: 'self_service_profile',
+  };
+  return {
+    ConditionExpression: 'attribute_not_exists(pk)',
+    Item: {
+      ...audit,
+      entityType: 'MemberPreferenceAudit',
+      pk: key('USER', member.id),
+      sk: `PREFERENCE_AUDIT#${timestamp}#${audit.id}`,
+    },
+    TableName: tableName,
+  };
+}
+
+function preferenceConcurrencyCondition(member: Member): {
+  expression: string;
+  names: Record<string, string>;
+  values: Record<string, NativeAttributeValue>;
+} {
+  return {
+    expression: [
+      member.isPublicProfile
+        ? '#currentPublic = :currentPublic'
+        : '(attribute_not_exists(#currentPublic) OR #currentPublic = :currentPublic)',
+      member.newsletterOptIn
+        ? '#currentNewsletter = :currentNewsletter'
+        : '(attribute_not_exists(#currentNewsletter) OR #currentNewsletter = :currentNewsletter)',
+    ].join(' AND '),
+    names: {
+      '#currentNewsletter': 'newsletterOptIn',
+      '#currentPublic': 'isPublicProfile',
+    },
+    values: {
+      ':currentNewsletter': member.newsletterOptIn,
+      ':currentPublic': member.isPublicProfile,
+    },
   };
 }
 
@@ -228,17 +309,26 @@ function joinNotificationPut(
   };
 }
 
-function handleFromEmail(email: string): string {
-  const localPart = email.slice(0, email.lastIndexOf('@'));
-  const normalized = localPart.toLowerCase().replace(/[^a-z0-9_.-]/g, '-').slice(0, 40);
-  return normalized || `member-${randomUUID().slice(0, 8)}`;
+function generatedMemberHandle(): string {
+  return `member-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
 }
 
 function normalizeMember(member: Member): Member {
   return {
     ...member,
+    isPublicProfile: member.isPublicProfile ?? false,
     minors: member.minors ?? [],
+    newsletterOptIn: member.newsletterOptIn ?? false,
     techStack: member.techStack ?? [],
+  };
+}
+
+function publicDirectoryIndex(
+  handle: string,
+): Record<'gsi2pk' | 'gsi2sk', string> {
+  return {
+    gsi2pk: 'MEMBERS#PUBLIC',
+    gsi2sk: `HANDLE#${handle}`,
   };
 }
 
@@ -255,6 +345,52 @@ function withoutStorageKeys<T>(item: Item | undefined): T | undefined {
     ...entity
   } = item;
   return entity as T;
+}
+
+function toNewsletterDelivery(item: Item): NewsletterDelivery {
+  const reconciliationResolution: unknown = item.reconciliationResolution;
+  const delivery: NewsletterDelivery = {
+    memberId: String(item.memberId),
+    outcome: item.outcome as NewsletterDelivery['outcome'],
+    ...(typeof item.claimedAt === 'string' ? { claimedAt: item.claimedAt } : {}),
+    ...(typeof item.leaseExpiresAt === 'string'
+      ? { leaseExpiresAt: item.leaseExpiresAt }
+      : {}),
+    ...(typeof item.attemptStartedAt === 'string'
+      ? { attemptStartedAt: item.attemptStartedAt }
+      : {}),
+    ...(typeof item.completedAt === 'string' ? { completedAt: item.completedAt } : {}),
+    ...(typeof item.providerMessageId === 'string'
+      ? { providerMessageId: item.providerMessageId }
+      : {}),
+    ...(typeof item.reconciledAt === 'string'
+      ? { reconciledAt: item.reconciledAt }
+      : {}),
+    ...(typeof item.reconciledBy === 'string'
+      ? { reconciledBy: item.reconciledBy }
+      : {}),
+    ...(reconciliationResolution === 'mark_sent' ||
+    reconciliationResolution === 'mark_skipped' ||
+    reconciliationResolution === 'retry'
+      ? { reconciliationResolution }
+      : {}),
+    ...(typeof item.reconciliationReason === 'string'
+      ? { reconciliationReason: item.reconciliationReason }
+      : {}),
+    ...(typeof item.duplicateRiskAcknowledged === 'boolean'
+      ? { duplicateRiskAcknowledged: item.duplicateRiskAcknowledged }
+      : {}),
+  };
+  return delivery;
+}
+
+function storageKey(item: Item): Record<'pk' | 'sk', string> {
+  const pk: unknown = item.pk;
+  const sk: unknown = item.sk;
+  if (typeof pk !== 'string' || typeof sk !== 'string') {
+    throw new Error('A stored item is missing its primary key.');
+  }
+  return { pk, sk };
 }
 
 function encodeCursor(lastKey: Record<string, NativeAttributeValue> | undefined): string | undefined {
@@ -351,12 +487,11 @@ export class DynamoClubRepository implements ClubRepository {
         new UpdateCommand({
           ExpressionAttributeValues: {
             ':lastSeenAt': timestamp,
-            ':updatedAt': timestamp,
           },
           Key: profileKey(existing.id),
           ReturnValues: 'ALL_NEW',
           TableName: this.tableName,
-          UpdateExpression: 'SET lastSeenAt = :lastSeenAt, updatedAt = :updatedAt',
+          UpdateExpression: 'SET lastSeenAt = :lastSeenAt',
         }),
       );
       return normalizeMember(withoutStorageKeys<Member>(result.Attributes as Item) as Member);
@@ -366,7 +501,7 @@ export class DynamoClubRepository implements ClubRepository {
       throw new Error('Identity lookup points to a missing member profile.');
     }
 
-    const handle = handleFromEmail(identity.email);
+    const handle = generatedMemberHandle();
     const member: Member = {
       createdAt: timestamp,
       displayName: identity.displayName,
@@ -376,8 +511,10 @@ export class DynamoClubRepository implements ClubRepository {
       identityProvider: identity.provider,
       identitySubject: identity.subject,
       ...(identity.tenantId ? { identityTenant: identity.tenantId } : {}),
+      isPublicProfile: false,
       lastSeenAt: timestamp,
       minors: [],
+      newsletterOptIn: false,
       role: 'member',
       status: 'active',
       techStack: [],
@@ -488,23 +625,410 @@ export class DynamoClubRepository implements ClubRepository {
     return nextCursor ? { items, nextCursor } : { items };
   }
 
+  public async listPublicDirectoryMembers(
+    limit: number,
+    cursor?: string,
+  ): Promise<Page<Member>> {
+    const result = await this.documentClient.send(
+      new QueryCommand({
+        ExclusiveStartKey: decodeCursor(cursor),
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':partition': 'MEMBERS#PUBLIC',
+          ':prefix': 'HANDLE#',
+          ':public': true,
+        },
+        FilterExpression: '#status = :active AND isPublicProfile = :public',
+        IndexName: 'gsi2',
+        KeyConditionExpression: 'gsi2pk = :partition AND begins_with(gsi2sk, :prefix)',
+        Limit: limit,
+        TableName: this.tableName,
+      }),
+    );
+    const items = (result.Items ?? [])
+      .map((item) => withoutStorageKeys<Member>(item as Item))
+      .filter((item): item is Member => item !== undefined)
+      .map(normalizeMember);
+    const nextCursor = encodeCursor(result.LastEvaluatedKey);
+    return nextCursor ? { items, nextCursor } : { items };
+  }
+
   public async updateMemberProfile(
     member: Member,
     patch: UpdateMemberProfileInput,
   ): Promise<Member> {
-    return normalizeMember(
-      await this.updateAndReturn<Member>(profileKey(member.id), { ...patch, updatedAt: now() }),
-    );
+    const timestamp = now();
+    const nextHandle = patch.handle ?? member.handle;
+    const nextIsPublic = patch.isPublicProfile ?? member.isPublicProfile;
+    const preferenceAudit = preferenceAuditPut(this.tableName, member, patch, timestamp);
+    const directoryFields =
+      nextIsPublic && member.status === 'active'
+        ? publicDirectoryIndex(nextHandle)
+        : { gsi2pk: null, gsi2sk: null };
+    const updatePatch = {
+      ...patch,
+      ...directoryFields,
+      gsi1sk: `HANDLE#${nextHandle}#${member.id}`,
+      updatedAt: timestamp,
+    };
+
+    let updated: Member;
+    if (nextHandle === member.handle) {
+      if (!preferenceAudit) {
+        updated = normalizeMember(
+          await this.updateAndReturn<Member>(profileKey(member.id), updatePatch),
+        );
+      } else {
+        const update = buildUpdate(updatePatch);
+        const concurrency = preferenceConcurrencyCondition(member);
+        try {
+          await this.documentClient.send(
+            new TransactWriteCommand({
+              TransactItems: [
+                {
+                  Update: {
+                    ConditionExpression: `attribute_exists(pk) AND ${concurrency.expression}`,
+                    ExpressionAttributeNames: {
+                      ...update.names,
+                      ...concurrency.names,
+                    },
+                    ExpressionAttributeValues: {
+                      ...update.values,
+                      ...concurrency.values,
+                    },
+                    Key: profileKey(member.id),
+                    TableName: this.tableName,
+                    UpdateExpression: update.expression,
+                  },
+                },
+                { Put: preferenceAudit },
+              ],
+            }),
+          );
+        } catch (error) {
+          if (isConditionalFailure(error)) {
+            throw conflict('Your privacy choices changed in another request. Refresh and retry.');
+          }
+          throw error;
+        }
+        const changedMember = await this.getMember(member.id);
+        if (!changedMember) throw notFound('Member');
+        updated = changedMember;
+      }
+    } else {
+      const update = buildUpdate(updatePatch);
+      const concurrency = preferenceAudit
+        ? preferenceConcurrencyCondition(member)
+        : undefined;
+      const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        {
+          Put: {
+            ConditionExpression: 'attribute_not_exists(pk)',
+            Item: {
+              entityType: 'HandleLookup',
+              memberId: member.id,
+              pk: key('HANDLE', nextHandle),
+              sk: 'LOOKUP',
+            },
+            TableName: this.tableName,
+          },
+        },
+        {
+          Update: {
+            ConditionExpression: [
+              '#currentHandle = :currentHandle',
+              ...(concurrency ? [concurrency.expression] : []),
+            ].join(' AND '),
+            ExpressionAttributeNames: {
+              ...update.names,
+              ...(concurrency?.names ?? {}),
+              '#currentHandle': 'handle',
+            },
+            ExpressionAttributeValues: {
+              ...update.values,
+              ...(concurrency?.values ?? {}),
+              ':currentHandle': member.handle,
+            },
+            Key: profileKey(member.id),
+            TableName: this.tableName,
+            UpdateExpression: update.expression,
+          },
+        },
+        {
+          Delete: {
+            ConditionExpression: 'memberId = :memberId',
+            ExpressionAttributeValues: { ':memberId': member.id },
+            Key: { pk: key('HANDLE', member.handle), sk: 'LOOKUP' },
+            TableName: this.tableName,
+          },
+        },
+      ];
+      if (preferenceAudit) transactionItems.push({ Put: preferenceAudit });
+      try {
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: transactionItems }),
+        );
+      } catch (error) {
+        if (isConditionalFailure(error)) {
+          throw conflict(
+            'That handle is unavailable or your privacy choices changed. Refresh and retry.',
+          );
+        }
+        throw error;
+      }
+      const changedMember = await this.getMember(member.id);
+      if (!changedMember) throw notFound('Member');
+      updated = changedMember;
+    }
+
+    if (patch.handle !== undefined) {
+      await this.refreshMemberHandleSnapshots(updated);
+    }
+    return updated;
+  }
+
+  public async updateMemberAvatar(
+    member: Member,
+    avatarUrl: string | null,
+  ): Promise<Member> {
+    const update = buildUpdate({ avatarUrl, updatedAt: now() });
+    const hasCurrentAvatar = member.avatarUrl !== undefined;
+    try {
+      const result = await this.documentClient.send(
+        new UpdateCommand({
+          ConditionExpression: hasCurrentAvatar
+            ? 'attribute_exists(pk) AND #currentAvatar = :currentAvatar'
+            : 'attribute_exists(pk) AND attribute_not_exists(#currentAvatar)',
+          ExpressionAttributeNames: {
+            ...update.names,
+            '#currentAvatar': 'avatarUrl',
+          },
+          ExpressionAttributeValues: {
+            ...update.values,
+            ...(hasCurrentAvatar ? { ':currentAvatar': member.avatarUrl } : {}),
+          },
+          Key: profileKey(member.id),
+          ReturnValues: 'ALL_NEW',
+          TableName: this.tableName,
+          UpdateExpression: update.expression,
+        }),
+      );
+      return normalizeMember(
+        withoutStorageKeys<Member>(result.Attributes as Item) as Member,
+      );
+    } catch (error) {
+      if (isConditionalFailure(error)) {
+        throw conflict('Your avatar changed in another request. Refresh and try again.');
+      }
+      throw error;
+    }
   }
 
   public async administerMember(
     memberId: string,
     changes: { role?: ClubRole; status?: MemberStatus },
+    actor: Member,
   ): Promise<Member> {
     const existing = await this.getMember(memberId);
     if (!existing) throw notFound('Member');
-    return normalizeMember(
-      await this.updateAndReturn<Member>(profileKey(memberId), { ...changes, updatedAt: now() }),
+    const timestamp = now();
+    const nextStatus = changes.status ?? existing.status;
+    const directoryFields =
+      nextStatus === 'active' && existing.isPublicProfile
+        ? publicDirectoryIndex(existing.handle)
+        : { gsi2pk: null, gsi2sk: null };
+    const update = buildUpdate({ ...changes, ...directoryFields, updatedAt: timestamp });
+    try {
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Update: {
+                ConditionExpression:
+                  'attribute_exists(pk) AND #currentRole = :currentRole AND #currentStatus = :currentStatus',
+                ExpressionAttributeNames: {
+                  ...update.names,
+                  '#currentRole': 'role',
+                  '#currentStatus': 'status',
+                },
+                ExpressionAttributeValues: {
+                  ...update.values,
+                  ':currentRole': existing.role,
+                  ':currentStatus': existing.status,
+                },
+                Key: profileKey(memberId),
+                TableName: this.tableName,
+                UpdateExpression: update.expression,
+              },
+            },
+            {
+              Put: {
+                ConditionExpression: 'attribute_not_exists(pk)',
+                Item: {
+                  actorId: actor.id,
+                  changes: {
+                    ...(changes.role === undefined
+                      ? {}
+                      : { role: { from: existing.role, to: changes.role } }),
+                    ...(changes.status === undefined
+                      ? {}
+                      : { status: { from: existing.status, to: changes.status } }),
+                  },
+                  createdAt: timestamp,
+                  entityType: 'MemberAdministrationAudit',
+                  id: randomUUID(),
+                  pk: key('MEMBER_AUDIT', memberId),
+                  sk: `AUDIT#${timestamp}#${randomUUID()}`,
+                  targetMemberId: memberId,
+                },
+                TableName: this.tableName,
+              },
+            },
+          ],
+        }),
+      );
+    } catch (error) {
+      if (isConditionalFailure(error)) {
+        throw conflict('The member role or status changed; review and retry.');
+      }
+      throw error;
+    }
+    const updated = await this.getMember(memberId);
+    if (!updated) throw notFound('Member');
+    return updated;
+  }
+
+  public async exportMemberData(memberId: string): Promise<MemberPrivacyExport> {
+    const profile = await this.getMember(memberId);
+    if (!profile) throw notFound('Member');
+    const userItems = await this.queryAllRaw({
+      ExpressionAttributeValues: { ':partition': key('USER', memberId) },
+      KeyConditionExpression: 'pk = :partition',
+    });
+    const linkedItems = await this.queryAllRaw({
+      ExpressionAttributeValues: { ':partition': key('USER', memberId) },
+      IndexName: 'gsi2',
+      KeyConditionExpression: 'gsi2pk = :partition',
+    });
+
+    const notifications = userItems
+      .filter((item) => item.entityType === 'Notification')
+      .map((item) => withoutStorageKeys<Notification>(item) as Notification);
+    const invitations = userItems
+      .filter((item) => item.entityType === 'MembershipInvitation')
+      .map((item) => withoutStorageKeys<MembershipInvitation>(item) as MembershipInvitation);
+    const memberships = linkedItems
+      .filter(
+        (item) =>
+          item.entityType === 'ProjectMembership' || item.entityType === 'TeamMembership',
+      )
+      .map((item) => withoutStorageKeys<ResourceMembership>(item) as ResourceMembership);
+    const eventRsvps = linkedItems
+      .filter((item) => item.entityType === 'EventRsvp')
+      .map((item) => withoutStorageKeys<EventRsvp>(item) as EventRsvp);
+    const preferenceHistory = userItems
+      .filter((item) => item.entityType === 'MemberPreferenceAudit')
+      .map(
+        (item) =>
+          withoutStorageKeys<MemberPreferenceAuditEntry>(item) as MemberPreferenceAuditEntry,
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+
+    return {
+      eventRsvps,
+      generatedAt: now(),
+      invitations,
+      limitations: [
+        'Membership and administrative audit records retain pseudonymous member UUIDs for integrity and are not included in this self-service export.',
+        'Legacy event RSVPs created before the privacy index was introduced may require an officer-assisted export.',
+        'Member-authored or owned project/team content, sent invitations and join-action history, resource audit snapshots, newsletter authorship, and historical notification snapshots require an officer-assisted search because they are not indexed by member.',
+      ],
+      memberships,
+      notifications,
+      preferenceHistory,
+      profile,
+    };
+  }
+
+  public async deleteMemberPersonalData(member: Member): Promise<void> {
+    const userItems = await this.queryAllRaw({
+      ExpressionAttributeValues: { ':partition': key('USER', member.id) },
+      KeyConditionExpression: 'pk = :partition',
+    });
+    const linkedItems = await this.queryAllRaw({
+      ExpressionAttributeValues: { ':partition': key('USER', member.id) },
+      IndexName: 'gsi2',
+      KeyConditionExpression: 'gsi2pk = :partition',
+    });
+
+    for (const item of linkedItems) {
+      if (item.entityType === 'ProjectMembership' || item.entityType === 'TeamMembership') {
+        await this.removePersonalDataFromMembership(item, member);
+      } else if (item.entityType === 'EventRsvp') {
+        await this.documentClient.send(
+          new DeleteCommand({
+            Key: storageKey(item),
+            TableName: this.tableName,
+          }),
+        );
+      }
+    }
+
+    for (const item of userItems) {
+      if (item.sk === 'PROFILE') continue;
+      await this.documentClient.send(
+        new DeleteCommand({ Key: storageKey(item), TableName: this.tableName }),
+      );
+    }
+
+    const timestamp = now();
+    await this.documentClient.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Delete: {
+              Key: {
+                pk: `IDENTITY#${member.identityProvider}#${member.identitySubject}`,
+                sk: 'LOOKUP',
+              },
+              TableName: this.tableName,
+            },
+          },
+          {
+            Delete: {
+              Key: emailLookupKey(member.email),
+              TableName: this.tableName,
+            },
+          },
+          {
+            Delete: {
+              Key: { pk: key('HANDLE', member.handle), sk: 'LOOKUP' },
+              TableName: this.tableName,
+            },
+          },
+          {
+            Delete: {
+              ConditionExpression: 'attribute_exists(pk)',
+              Key: profileKey(member.id),
+              TableName: this.tableName,
+            },
+          },
+          {
+            Put: {
+              ConditionExpression: 'attribute_not_exists(pk)',
+              Item: {
+                createdAt: timestamp,
+                entityType: 'MemberDeletionAudit',
+                memberReference: createHash('sha256').update(member.id).digest('hex'),
+                pk: 'PRIVACY_AUDIT',
+                sk: `DELETION#${timestamp}#${randomUUID()}`,
+              },
+              TableName: this.tableName,
+            },
+          },
+        ],
+      }),
     );
   }
 
@@ -1610,6 +2134,9 @@ export class DynamoClubRepository implements ClubRepository {
       new PutCommand({
         Item: {
           entityType: 'EventRsvp',
+          eventId: event.id,
+          gsi2pk: key('USER', member.id),
+          gsi2sk: `RSVP#EVENT#${event.id}`,
           memberHandle: member.handle,
           memberId: member.id,
           pk: key('EVENT', event.id),
@@ -1749,42 +2276,112 @@ export class DynamoClubRepository implements ClubRepository {
     return withoutStorageKeys<Newsletter>(result.Attributes as Item) as Newsletter;
   }
 
-  public async hasNewsletterDelivery(newsletterId: string, memberId: string): Promise<boolean> {
-    const result = await this.documentClient.send(
-      new GetCommand({
-        Key: newsletterDeliveryKey(newsletterId, memberId),
-        ProjectionExpression: 'pk',
-        TableName: this.tableName,
-      }),
-    );
-    return result.Item !== undefined;
+  public async claimNewsletterDelivery(
+    newsletterId: string,
+    memberId: string,
+  ): Promise<string | undefined> {
+    const claimedAtDate = new Date();
+    const claimedAt = claimedAtDate.toISOString();
+    const leaseExpiresAt = new Date(
+      claimedAtDate.getTime() + NEWSLETTER_DELIVERY_LEASE_MS,
+    ).toISOString();
+    const claimToken = randomUUID();
+    try {
+      await this.documentClient.send(
+        new UpdateCommand({
+          ConditionExpression:
+            'attribute_not_exists(pk) OR (#outcome = :claimed AND leaseExpiresAt < :claimedAt) OR #outcome = :retryPending',
+          ExpressionAttributeNames: { '#outcome': 'outcome' },
+          ExpressionAttributeValues: {
+            ':claimed': 'claimed',
+            ':claimedAt': claimedAt,
+            ':claimToken': claimToken,
+            ':entityType': 'NewsletterDelivery',
+            ':leaseExpiresAt': leaseExpiresAt,
+            ':memberId': memberId,
+            ':retryPending': 'retry_pending',
+          },
+          Key: newsletterDeliveryKey(newsletterId, memberId),
+          TableName: this.tableName,
+          UpdateExpression:
+            'SET claimedAt = :claimedAt, claimToken = :claimToken, entityType = :entityType, leaseExpiresAt = :leaseExpiresAt, memberId = :memberId, #outcome = :claimed REMOVE attemptStartedAt, completedAt, providerMessageId',
+        }),
+      );
+      return claimToken;
+    } catch (error) {
+      if (isConditionalFailure(error)) return undefined;
+      throw error;
+    }
   }
 
-  public async recordNewsletterDelivery(
+  public async beginNewsletterDeliveryAttempt(
+    newsletterId: string,
+    memberId: string,
+    claimToken: string,
+  ): Promise<boolean> {
+    const attemptStartedAt = now();
+    try {
+      await this.documentClient.send(
+        new UpdateCommand({
+          ConditionExpression:
+            '#outcome = :claimed AND claimToken = :claimToken AND leaseExpiresAt >= :attemptStartedAt',
+          ExpressionAttributeNames: { '#outcome': 'outcome' },
+          ExpressionAttributeValues: {
+            ':acceptedUnconfirmed': 'accepted_unconfirmed',
+            ':attemptStartedAt': attemptStartedAt,
+            ':claimed': 'claimed',
+            ':claimToken': claimToken,
+          },
+          Key: newsletterDeliveryKey(newsletterId, memberId),
+          TableName: this.tableName,
+          UpdateExpression:
+            'SET #outcome = :acceptedUnconfirmed, attemptStartedAt = :attemptStartedAt REMOVE leaseExpiresAt',
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (isConditionalFailure(error)) return false;
+      throw error;
+    }
+  }
+
+  public async completeNewsletterDelivery(
     newsletterId: string,
     memberId: string,
     outcome: 'sent' | 'skipped',
+    claimToken: string,
+    providerMessageId?: string,
   ): Promise<Newsletter> {
     const timestamp = now();
+    const expectedOutcome = outcome === 'sent' ? 'accepted_unconfirmed' : 'claimed';
     try {
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
             {
-              Put: {
-                ConditionExpression: 'attribute_not_exists(pk)',
-                Item: {
-                  ...newsletterDeliveryKey(newsletterId, memberId),
-                  acceptedAt: timestamp,
-                  entityType: 'NewsletterDelivery',
-                  memberId,
-                  outcome,
+              Update: {
+                ConditionExpression:
+                  outcome === 'skipped'
+                    ? '#outcome = :expectedOutcome AND claimToken = :claimToken AND leaseExpiresAt >= :completedAt'
+                    : '#outcome = :expectedOutcome AND claimToken = :claimToken',
+                ExpressionAttributeNames: { '#outcome': 'outcome' },
+                ExpressionAttributeValues: {
+                  ':completedAt': timestamp,
+                  ':claimToken': claimToken,
+                  ':expectedOutcome': expectedOutcome,
+                  ':nextOutcome': outcome,
+                  ...(providerMessageId ? { ':providerMessageId': providerMessageId } : {}),
                 },
+                Key: newsletterDeliveryKey(newsletterId, memberId),
                 TableName: this.tableName,
+                UpdateExpression: providerMessageId
+                  ? 'SET #outcome = :nextOutcome, completedAt = :completedAt, providerMessageId = :providerMessageId REMOVE claimToken, leaseExpiresAt'
+                  : 'SET #outcome = :nextOutcome, completedAt = :completedAt REMOVE claimToken, leaseExpiresAt',
               },
             },
             {
               Update: {
+                ConditionExpression: 'attribute_exists(pk)',
                 ExpressionAttributeValues: {
                   ':one': 1,
                   ':sentIncrement': outcome === 'sent' ? 1 : 0,
@@ -1808,6 +2405,156 @@ export class DynamoClubRepository implements ClubRepository {
     return newsletter;
   }
 
+  public async releaseNewsletterDeliveryClaim(
+    newsletterId: string,
+    memberId: string,
+    claimToken: string,
+  ): Promise<void> {
+    try {
+      await this.documentClient.send(
+        new DeleteCommand({
+          ConditionExpression: '#outcome = :claimed AND claimToken = :claimToken',
+          ExpressionAttributeNames: { '#outcome': 'outcome' },
+          ExpressionAttributeValues: {
+            ':claimed': 'claimed',
+            ':claimToken': claimToken,
+          },
+          Key: newsletterDeliveryKey(newsletterId, memberId),
+          TableName: this.tableName,
+        }),
+      );
+    } catch (error) {
+      if (!isConditionalFailure(error)) throw error;
+    }
+  }
+
+  public async listNewsletterDeliveries(
+    newsletterId: string,
+    limit: number,
+    cursor?: string,
+  ): Promise<Page<NewsletterDelivery>> {
+    const result = await this.documentClient.send(
+      new QueryCommand({
+        ExclusiveStartKey: decodeCursor(cursor),
+        ExpressionAttributeValues: {
+          ':partition': key('NEWSLETTER', newsletterId),
+          ':prefix': 'DELIVERY#',
+        },
+        KeyConditionExpression: 'pk = :partition AND begins_with(sk, :prefix)',
+        Limit: limit,
+        TableName: this.tableName,
+      }),
+    );
+    const items = (result.Items ?? []).map((item) => toNewsletterDelivery(item as Item));
+    const nextCursor = encodeCursor(result.LastEvaluatedKey);
+    return nextCursor ? { items, nextCursor } : { items };
+  }
+
+  public async reconcileNewsletterDelivery(
+    newsletterId: string,
+    memberId: string,
+    reconciliation: {
+      acknowledgePossibleDuplicate?: boolean | undefined;
+      reason: string;
+      resolution: 'mark_sent' | 'mark_skipped' | 'retry';
+    },
+    actor: Member,
+  ): Promise<Newsletter> {
+    const timestamp = now();
+    const deliveryKey = newsletterDeliveryKey(newsletterId, memberId);
+    const { acknowledgePossibleDuplicate, reason, resolution } = reconciliation;
+    if (resolution === 'retry' && acknowledgePossibleDuplicate !== true) {
+      throw badRequest('Retry requires acknowledgement of the possible duplicate delivery.');
+    }
+
+    if (resolution === 'retry') {
+      try {
+        await this.documentClient.send(
+          new UpdateCommand({
+            ConditionExpression:
+              '#outcome = :acceptedUnconfirmed OR #outcome = :legacySending OR #outcome = :retryPending',
+            ExpressionAttributeNames: { '#outcome': 'outcome' },
+            ExpressionAttributeValues: {
+              ':acceptedUnconfirmed': 'accepted_unconfirmed',
+              ':duplicateRiskAcknowledged': acknowledgePossibleDuplicate === true,
+              ':legacySending': 'sending',
+              ':reconciledAt': timestamp,
+              ':reconciledBy': actor.id,
+              ':reason': reason,
+              ':resolution': resolution,
+              ':retryPending': 'retry_pending',
+            },
+            Key: deliveryKey,
+            TableName: this.tableName,
+            UpdateExpression:
+              'SET #outcome = :retryPending, duplicateRiskAcknowledged = :duplicateRiskAcknowledged, reconciledAt = :reconciledAt, reconciledBy = :reconciledBy, reconciliationReason = :reason, reconciliationResolution = :resolution REMOVE claimToken, leaseExpiresAt',
+          }),
+        );
+      } catch (error) {
+        if (isConditionalFailure(error)) {
+          throw conflict('This delivery is no longer waiting for reconciliation.');
+        }
+        throw error;
+      }
+    } else {
+      const outcome = resolution === 'mark_sent' ? 'sent' : 'skipped';
+      try {
+        await this.documentClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                Update: {
+                  ConditionExpression:
+                    '#outcome = :acceptedUnconfirmed OR #outcome = :legacySending',
+                  ExpressionAttributeNames: { '#outcome': 'outcome' },
+                  ExpressionAttributeValues: {
+                    ':acceptedUnconfirmed': 'accepted_unconfirmed',
+                    ':completedAt': timestamp,
+                    ':legacySending': 'sending',
+                    ':nextOutcome': outcome,
+                    ':reconciledAt': timestamp,
+                    ':reconciledBy': actor.id,
+                    ':reason': reason,
+                    ':resolution': resolution,
+                  },
+                  Key: deliveryKey,
+                  TableName: this.tableName,
+                  UpdateExpression:
+                    'SET #outcome = :nextOutcome, completedAt = :completedAt, reconciledAt = :reconciledAt, reconciledBy = :reconciledBy, reconciliationReason = :reason, reconciliationResolution = :resolution REMOVE claimToken, leaseExpiresAt',
+                },
+              },
+              {
+                Update: {
+                  ConditionExpression: 'attribute_exists(pk)',
+                  ExpressionAttributeValues: {
+                    ':one': 1,
+                    ':sentIncrement': outcome === 'sent' ? 1 : 0,
+                    ':skippedIncrement': outcome === 'skipped' ? 1 : 0,
+                    ':updatedAt': timestamp,
+                  },
+                  Key: entityKey('NEWSLETTER', newsletterId),
+                  TableName: this.tableName,
+                  UpdateExpression:
+                    'SET updatedAt = :updatedAt ADD processedCount :one, sentCount :sentIncrement, skippedCount :skippedIncrement',
+                },
+              },
+            ],
+          }),
+        );
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+        const existing = await this.getRaw(deliveryKey);
+        if (existing?.outcome !== outcome) {
+          throw conflict('This delivery is no longer waiting for reconciliation.');
+        }
+      }
+    }
+
+    const newsletter = await this.getNewsletter(newsletterId);
+    if (!newsletter) throw notFound('Newsletter');
+    return newsletter;
+  }
+
   public async listNewsletterRecipients(
     limit: number,
     cursor?: string,
@@ -1818,9 +2565,10 @@ export class DynamoClubRepository implements ClubRepository {
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: {
           ':active': 'active',
+          ':optedIn': true,
           ':partition': 'MEMBERS',
         },
-        FilterExpression: '#status = :active',
+        FilterExpression: '#status = :active AND newsletterOptIn = :optedIn',
         IndexName: 'gsi1',
         KeyConditionExpression: 'gsi1pk = :partition',
         Limit: limit,
@@ -1833,6 +2581,201 @@ export class DynamoClubRepository implements ClubRepository {
       .map(normalizeMember);
     const nextCursor = encodeCursor(result.LastEvaluatedKey);
     return nextCursor ? { items, nextCursor } : { items };
+  }
+
+  private async queryAllRaw(
+    input: Omit<QueryCommandInput, 'ExclusiveStartKey' | 'TableName'>,
+  ): Promise<Item[]> {
+    const items: Item[] = [];
+    let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+    do {
+      const result = await this.documentClient.send(
+        new QueryCommand({
+          ...input,
+          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+          TableName: this.tableName,
+        }),
+      );
+      items.push(...((result.Items ?? []) as Item[]));
+      exclusiveStartKey = result.LastEvaluatedKey;
+    } while (exclusiveStartKey);
+    return items;
+  }
+
+  private async refreshMemberHandleSnapshots(member: Member): Promise<void> {
+    const items = await this.queryAllRaw({
+      ExpressionAttributeValues: { ':partition': key('USER', member.id) },
+      IndexName: 'gsi2',
+      KeyConditionExpression: 'gsi2pk = :partition',
+    });
+
+    for (const item of items) {
+      if (item.entityType === 'EventRsvp') {
+        await this.documentClient.send(
+          new UpdateCommand({
+            ConditionExpression: 'memberId = :memberId',
+            ExpressionAttributeValues: {
+              ':memberHandle': member.handle,
+              ':memberId': member.id,
+            },
+            Key: storageKey(item),
+            TableName: this.tableName,
+            UpdateExpression: 'SET memberHandle = :memberHandle',
+          }),
+        );
+        continue;
+      }
+      if (item.entityType !== 'ProjectMembership' && item.entityType !== 'TeamMembership') {
+        continue;
+      }
+      const resourceType: ResourceType =
+        item.entityType === 'ProjectMembership' ? 'project' : 'team';
+      const resourceId: unknown = item.resourceId;
+      if (typeof resourceId !== 'string') {
+        throw new Error('A member relationship has invalid resource metadata.');
+      }
+
+      let updated = false;
+      for (let attempt = 0; attempt < 3 && !updated; attempt += 1) {
+        const resource =
+          resourceType === 'project'
+            ? await this.getProject(resourceId)
+            : await this.getTeam(resourceId);
+        const memberIndex = resource?.memberIds.indexOf(member.id) ?? -1;
+        const relationshipUpdate: TransactionUpdate = {
+          ConditionExpression: 'memberId = :memberId',
+          ExpressionAttributeValues: {
+            ':memberHandle': member.handle,
+            ':memberId': member.id,
+          },
+          Key: storageKey(item),
+          TableName: this.tableName,
+          UpdateExpression: 'SET memberHandle = :memberHandle',
+        };
+        const transactionItems: TransactionItem[] = [{ Update: relationshipUpdate }];
+        if (resource && memberIndex >= 0) {
+          const nextHandles = [...resource.memberHandles];
+          nextHandles[memberIndex] = member.handle;
+          transactionItems.push({
+            Update: this.replaceResourceMembersUpdate(
+              resourceType,
+              resource,
+              resource.memberIds,
+              nextHandles,
+              now(),
+            ),
+          });
+        }
+        try {
+          await this.documentClient.send(
+            new TransactWriteCommand({ TransactItems: transactionItems }),
+          );
+          updated = true;
+        } catch (error) {
+          if (!isConditionalFailure(error) || attempt === 2) throw error;
+        }
+      }
+    }
+  }
+
+  private async removePersonalDataFromMembership(item: Item, member: Member): Promise<void> {
+    const resourceType: unknown = item.resourceType;
+    const resourceId: unknown = item.resourceId;
+    if (
+      (resourceType !== 'project' && resourceType !== 'team') ||
+      typeof resourceId !== 'string'
+    ) {
+      throw new Error('A member relationship has invalid resource metadata.');
+    }
+    const relationshipKey = storageKey(item);
+    const resource =
+      resourceType === 'project'
+        ? await this.getProject(resourceId)
+        : await this.getTeam(resourceId);
+    if (!resource) {
+      await this.documentClient.send(
+        new DeleteCommand({ Key: relationshipKey, TableName: this.tableName }),
+      );
+      return;
+    }
+
+    const index = resource.memberIds.indexOf(member.id);
+    if (resource.ownerId === member.id) {
+      const nextHandles = [...resource.memberHandles];
+      if (index >= 0) nextHandles[index] = 'deleted-member';
+      const transactionItems: NonNullable<
+        ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']
+      > = [];
+      if (index >= 0) {
+        transactionItems.push({
+          Update: this.replaceResourceMembersUpdate(
+            resourceType,
+            resource,
+            resource.memberIds,
+            nextHandles,
+            now(),
+          ),
+        });
+      }
+      transactionItems.push({
+        Update: {
+          ConditionExpression: 'attribute_exists(pk)',
+          ExpressionAttributeValues: { ':deletedHandle': 'deleted-member' },
+          Key: relationshipKey,
+          TableName: this.tableName,
+          UpdateExpression: 'SET memberHandle = :deletedHandle REMOVE gsi2pk, gsi2sk',
+        },
+      });
+      try {
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: transactionItems }),
+        );
+      } catch (error) {
+        if (isConditionalFailure(error)) {
+          throw conflict('An owned club resource changed during account deletion; retry.');
+        }
+        throw error;
+      }
+      return;
+    }
+
+    if (index < 0) {
+      await this.documentClient.send(
+        new DeleteCommand({ Key: relationshipKey, TableName: this.tableName }),
+      );
+      return;
+    }
+    const nextMemberIds = resource.memberIds.filter((id) => id !== member.id);
+    const nextMemberHandles = resource.memberHandles.filter((_, itemIndex) => itemIndex !== index);
+    try {
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Update: this.replaceResourceMembersUpdate(
+                resourceType,
+                resource,
+                nextMemberIds,
+                nextMemberHandles,
+                now(),
+              ),
+            },
+            {
+              Delete: {
+                ConditionExpression: 'attribute_exists(pk)',
+                Key: relationshipKey,
+                TableName: this.tableName,
+              },
+            },
+          ],
+        }),
+      );
+    } catch (error) {
+      if (isConditionalFailure(error)) {
+        throw conflict('A club resource changed during account deletion; retry the request.');
+      }
+      throw error;
+    }
   }
 
   private async getEntity<T>(kind: EntityKind, id: string): Promise<T | undefined> {

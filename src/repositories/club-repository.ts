@@ -5,11 +5,13 @@ import type {
   EventRsvp,
   JoinRequestStatus,
   Member,
+  MemberPrivacyExport,
   MemberStatus,
   MembershipAuditEntry,
   MembershipInvitation,
   MembershipStatus,
   Newsletter,
+  NewsletterDelivery,
   NewsletterStatus,
   Notification,
   Page,
@@ -45,10 +47,15 @@ export interface ClubRepository {
   ensureMember(identity: AuthenticatedIdentity): Promise<Member>;
   getMember(memberId: string): Promise<Member | undefined>;
   listMembers(search: string, limit: number, cursor?: string): Promise<Page<Member>>;
+  listPublicDirectoryMembers(limit: number, cursor?: string): Promise<Page<Member>>;
   updateMemberProfile(member: Member, patch: UpdateMemberProfileInput): Promise<Member>;
+  updateMemberAvatar(member: Member, avatarUrl: string | null): Promise<Member>;
+  exportMemberData(memberId: string): Promise<MemberPrivacyExport>;
+  deleteMemberPersonalData(member: Member): Promise<void>;
   administerMember(
     memberId: string,
     changes: { role?: ClubRole; status?: MemberStatus },
+    actor: Member,
   ): Promise<Member>;
   listMemberNotifications(
     memberId: string,
@@ -117,11 +124,38 @@ export interface ClubRepository {
     status: NewsletterStatus,
   ): Promise<Newsletter>;
   markNewsletterFanout(newsletterId: string, recipientCount: number): Promise<Newsletter>;
-  hasNewsletterDelivery(newsletterId: string, memberId: string): Promise<boolean>;
-  recordNewsletterDelivery(
+  claimNewsletterDelivery(newsletterId: string, memberId: string): Promise<string | undefined>;
+  beginNewsletterDeliveryAttempt(
+    newsletterId: string,
+    memberId: string,
+    claimToken: string,
+  ): Promise<boolean>;
+  completeNewsletterDelivery(
     newsletterId: string,
     memberId: string,
     outcome: 'sent' | 'skipped',
+    claimToken: string,
+    providerMessageId?: string,
+  ): Promise<Newsletter>;
+  releaseNewsletterDeliveryClaim(
+    newsletterId: string,
+    memberId: string,
+    claimToken: string,
+  ): Promise<void>;
+  listNewsletterDeliveries(
+    newsletterId: string,
+    limit: number,
+    cursor?: string,
+  ): Promise<Page<NewsletterDelivery>>;
+  reconcileNewsletterDelivery(
+    newsletterId: string,
+    memberId: string,
+    reconciliation: {
+      acknowledgePossibleDuplicate?: boolean | undefined;
+      reason: string;
+      resolution: 'mark_sent' | 'mark_skipped' | 'retry';
+    },
+    actor: Member,
   ): Promise<Newsletter>;
   listNewsletterRecipients(limit: number, cursor?: string): Promise<Page<Member>>;
 
