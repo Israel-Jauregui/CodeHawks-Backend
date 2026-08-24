@@ -49,21 +49,25 @@ After either login:
 1. Call `GET /v1/me` to provision/load the profile and authoritative club role.
 2. Use the member UUID returned by the API; do not use email, Entra `oid`, or Cognito `sub` as an application ID.
 3. Replace project/team IDs typed as numbers with UUID strings.
-4. Map backend fields into existing view models as needed: `id`, `name`, `description`, `repoUrl`, `imageUrl`, and `memberHandles`.
+4. Map backend fields into existing view models as needed. Public project/team responses intentionally omit `ownerId`, `memberIds`, and `memberHandles`; use protected management/membership routes where IDs are authorized.
 5. Use `/v1/me/memberships` for “my projects/teams,” protected `/{id}/manage` reads for owner screens, and `/v1/manage/*` queues for officers.
 6. Load `/v1/me/notifications?read=false` for an unread badge and `/v1/me/notifications` for the inbox. Use `resourceType` plus `resourceId` for navigation, and mark a notification read after opening it.
 7. Let members optionally edit `techStack` on their profile. Do not add a required onboarding gate; an empty array is valid.
-8. Build member management from the membership/invitation routes in [api.md](api.md). Search `/v1/members` first to obtain a member UUID for invite/direct-add/transfer operations.
-9. For avatars, request a presigned POST, upload directly to S3, then save `publicUrl` on the profile. Do not proxy the file through the API Lambda.
-10. For an attached project/team image, create the resource, request its protected `/{id}/image-upload` presigned POST, upload directly to S3, then `PATCH` the resource with `publicUrl` as `imageUrl`. If no image is attached, render the frontend default; do not persist a placeholder URL.
-11. Treat `401` as token/session handling, `403` as an actual policy response, `409` as a stale/capacity/business-state response, and show useful field messages from `400` validation errors.
+8. Build member management from the membership/invitation routes in [api.md](api.md). Search `/v1/members` with at least three trimmed handle characters to obtain a minimum-field member UUID result for invite/direct-add/transfer operations.
+9. For avatars, request a presigned POST, upload directly to its pending S3 key, then send the returned `uploadId` to `POST /v1/me/avatar-upload/finalize`. Use `DELETE /v1/me/avatar` for explicit removal. Never patch `avatarUrl` directly or proxy file bytes through the API Lambda.
+10. For an attached project/team/event image, create the resource, request its protected `/{id}/image-upload` presigned POST, upload directly to the pending key, then send `uploadId` to the matching `/{id}/image-upload/finalize` route. Finalization may reject an expired, missing, oversized, wrong-scope, MIME-mismatched, or magic-byte-mismatched object. If no image is attached, render the frontend default; do not persist a placeholder URL.
+11. Expose separate unchecked-by-default controls for `isPublicProfile` and `newsletterOptIn`. Load public cards from unauthenticated `/v1/directory/members`; never substitute the invitation-search endpoint.
+12. Offer `GET /v1/me/export` and a strongly confirmed `DELETE /v1/me`. The export now includes `preferenceHistory`, an array of old/new privacy/newsletter choices with actor, timestamp, source, and policy version. Deletion returns `204`; signing in again creates a new private/unsubscribed profile.
+13. Treat `401` as token/session handling, `403` as an actual policy response, `409` as a stale/capacity/business-state response, and show useful field messages from `400` validation errors.
 
 The notification list is cursor-paginated. `read=false` uses a sparse unread index, so it does not walk past read messages. A `read=true` page can still be shorter than its requested limit while returning `nextCursor`. The inbox is pull-based for now; poll on app focus or after membership actions rather than continuously.
 
-Public project/team/event reads need no token. Member search, profiles, invitations, rosters, and every mutation do.
+Public project/team/event and opted-in directory reads need no token. Invitation search, private profiles, invitations, rosters, and every mutation do.
 
 ## Newsletter composer
 
 Show the composer only when `/v1/me` reports `reservation_designee`, `treasurer`, `vice_president`, or `president`; this is a usability choice only, because the API independently enforces `newsletters.send`.
 
-Generate one `crypto.randomUUID()` per compose action and send it as `idempotencyKey`. After the API returns `202`, poll `GET /v1/newsletters/{id}` or refresh the newsletter history to display `queued`, `sending`, `sent`, and the delivery counters. Do not ask the browser to provide recipient addresses—the backend always resolves the active-member audience.
+Generate one `crypto.randomUUID()` per compose action and send it as `idempotencyKey`. After the API returns `202`, poll `GET /v1/newsletters/{id}` or refresh the newsletter history to display `queued`, `sending`, `sent`, and the delivery counters. Do not ask the browser to provide recipient addresses—the backend resolves only active members who explicitly opted in and checks the choice again before send.
+
+Only show delivery reconciliation to a Vice President or President. Load the cursor-paginated `/v1/newsletters/{id}/deliveries` route and clearly label `accepted_unconfirmed` as “send attempted; SES acceptance unknown.” Require a written reason for every resolution. A `retry` control must additionally require the officer to affirm that a duplicate is possible and send `acknowledgePossibleDuplicate: true`; do not precheck this acknowledgement.

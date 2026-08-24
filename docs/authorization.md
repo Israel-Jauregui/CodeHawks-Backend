@@ -9,7 +9,8 @@ Authentication proves control of an eligible school identity. Authorization is s
 | Manage own project/team members | Yes | Yes | Yes | Yes | Yes |
 | Request membership / respond to invites | Yes | Yes | Yes | Yes | Yes |
 | RSVP to published events | Yes | Yes | Yes | Yes | Yes |
-| Send newsletter to all active club accounts | No | Yes | Yes | Yes | Yes |
+| Compose newsletter to active opt-ins | No | Yes | Yes | Yes | Yes |
+| Reconcile ambiguous newsletter delivery | No | No | No | Yes | Yes |
 | Manage all events and RSVP rosters | No | Yes | No | Yes | Yes |
 | Manage all projects/teams | No | No | Yes | Yes | Yes |
 | Suspend/reactivate member accounts | No | No | No | Yes | Yes |
@@ -25,7 +26,7 @@ Additional rules:
 - Archived resources cannot admit members; unpublished/archived events cannot accept RSVP changes.
 - A Vice President cannot modify a President account.
 - A user cannot suspend their own account.
-- A suspended user may read `/v1/me` but cannot use other protected operations.
+- A suspended user may read `/v1/me`, export `/v1/me/export`, and delete `/v1/me`, but cannot use other protected operations.
 - Browser fields and token role/group claims are ignored. Only DynamoDB is authoritative.
 
 The first President is established once with AWS operator credentials after their first sign-in. Thereafter, the President assigns roles through the API.

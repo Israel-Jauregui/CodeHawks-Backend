@@ -31,7 +31,8 @@ flowchart LR
   LAMBDA -->|Queue newsletter| SQS[SQS + dead-letter queue]
   SQS --> WORKER[Newsletter worker Lambda]
   WORKER --> SES[Amazon SES]
-  SPA -->|Presigned image uploads| S3[(Private S3 origin)]
+  SPA -->|Presigned pending image uploads| S3[(Private S3 origin)]
+  LAMBDA -->|Validate + finalize media| S3
   S3 --> CDN[CloudFront media CDN]
   LAMBDA --> LOGS[CloudWatch logs]
 ```
@@ -48,18 +49,19 @@ Cost-conscious defaults:
 ## Implemented functionality
 
 - provider-neutral just-in-time member accounts with no stored passwords
-- profiles with display name, avatar, bio, major/minors, optional tech stack, GitHub, and LinkedIn
-- constrained presigned avatar, project, and team image uploads for JPEG, PNG, and WebP files up to 5 MiB
+- private-by-default profiles with a random alias, unique editable handle, public-directory opt-in, newsletter opt-in, avatar, bio, major/minors, optional tech stack, GitHub, and LinkedIn
+- quarantined presigned avatar, project, team, and event uploads for JPEG, PNG, and WebP files up to 5 MiB, with lifecycle expiry, owned-path/size/type/magic-byte validation, ETag-pinned reads, and create-only server-side finalization before URLs are stored
 - roles: Member, Reservation Designee, Treasurer, Vice President, and President
-- role and account-status management, with DynamoDB as the authorization authority
-- member directory with public-safe profile output
+- actor-audited role and account-status management, with DynamoDB as the authorization authority
+- public opt-in member directory plus minimum-field authenticated invitation search
+- self-service indexed-data export and account deletion/anonymization, including all attributable avatar objects
 - members can create projects and teams and request to join them
 - in-app notification inbox for project/team join requests, withdrawals, approvals, and rejections
 - project/team owners and authorized officers can list requests, accept/reject them, invite members, directly add members, revoke invitations, remove members, and transfer ownership
 - invitees can accept/decline; members can withdraw requests or leave
 - transactional capacity enforcement and a membership audit history
 - event draft/publish/archive management, member RSVPs, and officer RSVP rosters
-- role-gated officer newsletters queued to every active club account through SQS and SES
+- role-gated optional club newsletters queued only to active explicit opt-ins, with conditional delivery claims and an opt-out footer
 - public project/team/event listings with cursor pagination
 - request validation, structured errors, exact CORS origins, throttling, and logs
 - Terraform for DynamoDB, Lambda, HTTP API, selectable auth, SES/SQS email, S3/CloudFront media, IAM, logs, and an optional budget
@@ -113,5 +115,5 @@ docs/             setup, contracts, data model, and migration guidance
 
 - No finance ledger yet. `treasury.manage` is reserved, but financial records need a separate requirements and security pass.
 - No custom API/media domain until DNS ownership and final hostnames are confirmed.
-- No automatic image resizing, EXIF stripping, or content moderation yet; current image uploads enforce size and declared MIME type only.
+- No automatic image decoding/resizing, EXIF stripping, or content moderation yet. The server quarantines pending uploads and conditionally copies only size/type/signature-validated bytes to a versioned final key, but these checks do not prove that image pixels decode safely or remove metadata.
 - No guessed legacy import. Import tooling should be built against a real read-only export and an agreed cutover window.
