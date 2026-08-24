@@ -38,6 +38,11 @@ output "media_public_base_url" {
   value       = "https://${aws_cloudfront_distribution.media.domain_name}"
 }
 
+output "media_upload_origin" {
+  description = "S3 origin used by browser presigned POST uploads; add this exact non-sensitive origin to the frontend connect-src CSP."
+  value       = "https://${aws_s3_bucket.media.bucket_regional_domain_name}"
+}
+
 output "newsletter_queue_name" {
   description = "SQS queue buffering newsletter fanout and delivery jobs."
   value       = aws_sqs_queue.newsletter.name

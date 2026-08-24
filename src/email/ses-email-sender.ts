@@ -11,7 +11,7 @@ function escapeHtml(value: string): string {
 }
 
 export interface NewsletterEmailSender {
-  sendNewsletter(newsletter: Newsletter, recipient: Member): Promise<void>;
+  sendNewsletter(newsletter: Newsletter, recipient: Member): Promise<string | undefined>;
 }
 
 export class SesNewsletterEmailSender implements NewsletterEmailSender {
@@ -22,11 +22,14 @@ export class SesNewsletterEmailSender implements NewsletterEmailSender {
     private readonly client: SESv2Client = new SESv2Client({}),
   ) {}
 
-  public async sendNewsletter(newsletter: Newsletter, recipient: Member): Promise<void> {
+  public async sendNewsletter(
+    newsletter: Newsletter,
+    recipient: Member,
+  ): Promise<string | undefined> {
     const safeBody = escapeHtml(newsletter.body).replaceAll(/\r?\n/g, '<br>');
-    const footer = `Sent by @${escapeHtml(newsletter.createdByHandle)} to active CodeHawks club members.`;
+    const footer = `Sent by @${escapeHtml(newsletter.createdByHandle)} to CodeHawks members who opted in to club announcements. To stop these messages, sign in at codehawks.org and turn off Newsletter announcements in your profile settings.`;
 
-    await this.client.send(
+    const response = await this.client.send(
       new SendEmailCommand({
         ...(this.configurationSetName
           ? { ConfigurationSetName: this.configurationSetName }
@@ -40,7 +43,7 @@ export class SesNewsletterEmailSender implements NewsletterEmailSender {
               },
               Text: {
                 Charset: 'UTF-8',
-                Data: `${newsletter.body}\n\n---\nSent by @${newsletter.createdByHandle} to active CodeHawks club members.`,
+                Data: `${newsletter.body}\n\n---\nSent by @${newsletter.createdByHandle} to CodeHawks members who opted in to club announcements. To stop these messages, sign in at https://codehawks.org and turn off Newsletter announcements in your profile settings.`,
               },
             },
             Subject: { Charset: 'UTF-8', Data: newsletter.subject },
@@ -51,5 +54,6 @@ export class SesNewsletterEmailSender implements NewsletterEmailSender {
         ...(this.replyToAddress ? { ReplyToAddresses: [this.replyToAddress] } : {}),
       }),
     );
+    return response.MessageId;
   }
 }

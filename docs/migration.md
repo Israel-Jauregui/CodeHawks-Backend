@@ -4,11 +4,11 @@ Treat the unfinished backend as a source of domain intent and recoverable club d
 
 | Legacy data | New representation | Notes |
 |---|---|---|
-| member username | `Member.handle` | Initially school-email-derived; report collisions before import |
+| member username | `Member.handle` | Validate against current handle rules, reserve uniquely, and set both consent flags to `false`; never derive a new handle from email |
 | full name | `Member.displayName` | Seed from identity provider, then member-editable |
 | email | `Member.email` | Link only after the selected provider verifies exact `@ung.edu` control |
 | password hash / temp code / verified flag | Not migrated | Entra or Cognito email OTP replaces legacy auth |
-| profile picture | S3/CloudFront URL in `avatarUrl` | Validate old HTTPS URLs or upload reviewed assets through a controlled importer |
+| profile picture | S3/CloudFront URL in `avatarUrl` | Re-encode/review and upload to the member-owned media prefix; arbitrary external URLs are no longer accepted |
 | bio / GitHub / LinkedIn | Member profile fields | Validate and normalize URLs |
 | major / minor tables | `major` and `minors` | Small profile attributes stay on the member item |
 | project row | Project metadata | Assign new UUID/owner and draft/review/published state |

@@ -6,7 +6,7 @@ aws_region  = "us-east-1"
 # Cloudflare-owned Terraform state can publish the three Easy DKIM CNAMEs.
 ses_domain            = "codehawks.org"
 email_from_address    = "CodeHawks <noreply@codehawks.org>"
-email_reply_to_address = "officers@codehawks.org"
+email_reply_to_address = "contact@codehawks.org"
 
 # Preferred after an ordinary non-admin UNG user successfully completes the consent probe.
 auth_provider       = "entra"

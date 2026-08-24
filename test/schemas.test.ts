@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  imageUploadFinalizeSchema,
   imageUploadSchema,
   createNewsletterSchema,
   memberProfilePatchSchema,
+  newsletterDeliveryReconciliationSchema,
 } from '../src/domain/schemas.js';
 
 describe('request schemas', () => {
@@ -18,8 +20,35 @@ describe('request schemas', () => {
     ).toThrow();
   });
 
-  it('allows only HTTPS profile links', () => {
+  it('accepts only server-issued version-four image upload identifiers', () => {
+    expect(
+      imageUploadFinalizeSchema.parse({
+        uploadId: '12345678-1234-4123-8123-123456789abc.webp',
+      }),
+    ).toEqual({ uploadId: '12345678-1234-4123-8123-123456789abc.webp' });
+    for (const uploadId of [
+      '../other/image.webp',
+      '12345678-1234-1123-8123-123456789abc.webp',
+      '12345678-1234-4123-8123-123456789abc.svg',
+    ]) {
+      expect(() => imageUploadFinalizeSchema.parse({ uploadId })).toThrow();
+    }
+  });
+
+  it('allows only provider-owned HTTPS profile links', () => {
     expect(() => memberProfilePatchSchema.parse({ linkedinUrl: 'javascript:alert(1)' })).toThrow();
+    expect(() =>
+      memberProfilePatchSchema.parse({ githubUrl: 'https://github.com.evil.example/codehawk' }),
+    ).toThrow('GitHub URL must use the github.com domain');
+    expect(() =>
+      memberProfilePatchSchema.parse({ linkedinUrl: 'https://linkedin.com@evil.example/in/member' }),
+    ).toThrow('LinkedIn URL must use the linkedin.com domain');
+    expect(memberProfilePatchSchema.parse({ githubUrl: 'https://github.com/codehawk' })).toEqual({
+      githubUrl: 'https://github.com/codehawk',
+    });
+    expect(
+      memberProfilePatchSchema.parse({ linkedinUrl: 'https://www.linkedin.com/in/codehawk' }),
+    ).toEqual({ linkedinUrl: 'https://www.linkedin.com/in/codehawk' });
     expect(() => memberProfilePatchSchema.parse({ avatarUrl: 'http://example.test/me.png' })).toThrow(
       'URL must use HTTPS',
     );
@@ -31,6 +60,15 @@ describe('request schemas', () => {
         techStack: ['TypeScript', ' typescript ', 'AWS', 'React'],
       }),
     ).toEqual({ techStack: ['TypeScript', 'AWS', 'React'] });
+  });
+
+  it('normalizes a safe handle and rejects ambiguous or unsafe handles', () => {
+    expect(memberProfilePatchSchema.parse({ handle: 'Code-Hawk_26' })).toEqual({
+      handle: 'code-hawk_26',
+    });
+    for (const handle of ['ab', '-starts-wrong', 'ends-wrong-', 'space name', 'a.b']) {
+      expect(() => memberProfilePatchSchema.parse({ handle })).toThrow();
+    }
   });
 
   it('caps member tech stacks at 25 entries', () => {
@@ -49,5 +87,21 @@ describe('request schemas', () => {
         subject: 'Hello\nBcc: target@example.test',
       }),
     ).toThrow('Subject must be one line');
+  });
+
+  it('requires a reason and explicit possible-duplicate acknowledgement for retries', () => {
+    expect(() =>
+      newsletterDeliveryReconciliationSchema.parse({
+        reason: 'SES outcome could not be confirmed.',
+        resolution: 'retry',
+      }),
+    ).toThrow('Retry requires acknowledgePossibleDuplicate=true');
+    expect(
+      newsletterDeliveryReconciliationSchema.parse({
+        acknowledgePossibleDuplicate: true,
+        reason: 'SES outcome could not be confirmed.',
+        resolution: 'retry',
+      }),
+    ).toMatchObject({ acknowledgePossibleDuplicate: true, resolution: 'retry' });
   });
 });

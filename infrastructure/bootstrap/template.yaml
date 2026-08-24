@@ -147,10 +147,30 @@ Resources:
               - logs:CreateLogStream
               - logs:PutLogEvents
             Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppResourcePrefix}-*:*
-          - Sid: CreateMediaUploads
+          - Sid: ManagePendingAndFinalMediaObjects
             Effect: Allow
-            Action: s3:PutObject
-            Resource: !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/*
+            Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/avatars/*
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/events/*
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/pending/avatars/*
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/pending/events/*
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/pending/projects/*
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/pending/teams/*
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/projects/*
+              - !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}/teams/*
+          - Sid: ListMemberAvatarMedia
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub arn:${AWS::Partition}:s3:::${AppResourcePrefix}-media-${AWS::AccountId}
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - avatars/*
+                  - pending/avatars/*
           - Sid: UseNewsletterQueues
             Effect: Allow
             Action:

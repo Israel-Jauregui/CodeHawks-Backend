@@ -8,7 +8,7 @@
 |---|---|
 | Spec format | `1` |
 | Created | `2026-08-08T12:17:24-04:00` (`America/New_York`, EDT) |
-| Revised | `2026-08-08T14:18:11-04:00` (`America/New_York`, EDT) — added authorized project/team image uploads |
+| Revised | `2026-08-23` (`America/New_York`, EDT) — added private-by-default directory/newsletter choices, privacy workflows, and validated media |
 | Git branch | `main` |
 | Git commit | **`NO HEAD — UNCOMMITTED SNAPSHOT`** |
 | Git state at creation | The repository had no first commit and all implementation files were untracked |
@@ -70,7 +70,7 @@ ClubWebsite-Frontend
                     +--> API Lambda (Node.js/TypeScript)
                     |      +--> DynamoDB single table
                     |      +--> SQS newsletter queue
-                    |      +--> S3 avatar/project/team image presigned POSTs
+                    |      +--> S3 pending image presigns + validated finalization
                     |
                     +--> newsletter worker Lambda --> SES
 
@@ -135,7 +135,7 @@ Resource ownership is separate from club office. Any active member can own and m
 Important invariants:
 
 - Never accept a role from the frontend or access token.
-- Suspended users may read only `GET /v1/me`; all other protected operations are denied.
+- Suspended users may read `GET /v1/me`, export `GET /v1/me/export`, or delete `DELETE /v1/me`; other protected operations are denied.
 - A Vice President cannot modify a President account.
 - A member cannot suspend their own account.
 - Only a President can assign club roles.
@@ -148,13 +148,14 @@ Important invariants:
 
 ### Member
 
-Private member data includes the identity provider/subject, optional tenant, email, application UUID, email-derived handle, display name, club role, active/suspended status, profile fields, and timestamps.
+Private member data includes the identity provider/subject, optional tenant, email, application UUID, random initial/user-chosen handle, display name, club role, active/suspended status, consent choices, profile fields, and timestamps. New and legacy records default `isPublicProfile` and `newsletterOptIn` to `false`.
 
-Public-safe profile output is produced only by `toPublicMember` and excludes email, provider metadata, status, and last-seen data.
+Public directory output is produced only by `toPublicDirectoryMember` for active explicit opt-ins and excludes email, internal/provider IDs, role/status, consent flags, and all timestamps. Authenticated invitation search uses `toPublicMember`, requires a handle prefix of at least three characters, and returns only `id`, `handle`, and `displayName`.
 
 Editable profile fields:
 
 - `displayName`
+- `handle`
 - `bio`
 - `avatarUrl`
 - `major`
@@ -162,13 +163,15 @@ Editable profile fields:
 - `techStack` (maximum 25 entries, each maximum 50 characters)
 - `githubUrl`
 - `linkedinUrl`
+- `isPublicProfile`
+- `newsletterOptIn`
 
 `techStack` is optional and public. New members receive `[]`; older records missing the attribute are normalized to `[]` at repository read boundaries. Profile updates remove case-insensitive duplicates while preserving the first spelling. Signup and login never require the field.
 
 ### Project
 
 - Member-created with UUID, name, description, owner, optional repository/demo/image URLs, project tech stack, and member projections.
-- Owners and project-managing officers can request a constrained project-owned image upload, then persist its CloudFront URL as `imageUrl`.
+- Owners and project-managing officers can request a constrained project-owned pending upload; only the protected finalization route can generate and persist its CloudFront `imageUrl`.
 - Publication states: `draft`, `pending_review`, `published`, `archived`.
 - Creator becomes owner and active contributor in the same transaction.
 - Only published projects are publicly readable.
@@ -181,7 +184,7 @@ Editable profile fields:
 - Statuses: `open`, `closed`, `archived`.
 - Join policies: `open`, `approval_required`.
 - An open-policy team admits immediately if capacity is available. An approval-required team creates a join request.
-- Owners and team-managing officers can request a constrained team-owned image upload, then persist its CloudFront URL as `imageUrl`.
+- Owners and team-managing officers can request a constrained team-owned pending upload; only the protected finalization route can generate and persist its CloudFront `imageUrl`.
 
 ### Resource membership
 
@@ -228,20 +231,21 @@ The repository currently supports basic event draft/publish/archive CRUD, going/
 ### Newsletter
 
 - Only Reservation Designee, Treasurer, Vice President, and President can send.
-- Audience is every active club account; the frontend never supplies recipient addresses.
+- Audience is every active account with `newsletterOptIn=true`; the frontend never supplies recipient addresses and the worker rechecks consent immediately before sending.
 - API persists an idempotent newsletter and queues SQS work, returning `202` before delivery.
-- The worker fans out through SES and records per-member delivery idempotency markers.
+- The worker fans out through SES and uses a conditional per-member delivery claim before the external send.
 - Statuses are `queued`, `sending`, `sent`, and `queue_failed`.
 - Counters record recipients, processed, sent-to-SES, and skipped. “Sent” does not prove mailbox delivery.
 
 ### Media
 
-- The API creates five-minute S3 presigned POSTs for member avatars and authorized project/team resource paths.
+- The API creates five-minute S3 presigned POSTs only for owner-scoped `pending/` avatar/project/team/event paths.
 - Supported declared MIME types are JPEG, PNG, and WebP; maximum size is 5 MiB.
-- S3 is private and CloudFront serves the resulting URL.
-- Resource image keys are isolated under `projects/{projectId}/` and `teams/{teamId}/`; a caller must own the resource or hold its management permission before the API issues a presign.
+- S3 is private. CloudFront can read only finalized avatar/resource prefixes; it cannot read `pending/`, whose abandoned objects expire after one day.
+- Resource image keys are isolated under `projects/{projectId}/`, `teams/{teamId}/`, and `events/{eventId}/`; a caller must own the project/team or hold the corresponding management permission before the API issues a presign or finalizes it. Finalization reads the complete ETag-pinned object, verifies its exact scope, size, declared type, and JPEG/PNG/WebP magic bytes, then creates the final key only if it does not already exist. Invalid objects are deleted, and presign reuse cannot overwrite an immutable final URL.
+- Avatars use versioned URLs with CloudFront caching disabled. Avatar replacement uses a conditional profile update and deletes only the previous URL; explicit removal and account deletion remove current/all attributable avatar objects.
 - Missing resource images are represented by a frontend-owned default asset rather than a stored placeholder URL.
-- The current pipeline does not inspect file contents, resize images, strip EXIF data, or moderate content.
+- The current pipeline does not decode/resize images, strip EXIF data, or moderate content; file-signature validation is not a metadata-removal guarantee.
 
 ## DynamoDB design
 
@@ -281,7 +285,7 @@ Primary item patterns:
 - Resource management partitions are `RESOURCES#PROJECTS`, `RESOURCES#TEAMS`, and `RESOURCES#EVENTS`.
 - Newsletter history uses `NEWSLETTERS`.
 
-Public project/team cards denormalize `memberIds` and `memberHandles`; public conversion removes private IDs. Relationship and audit records remain the reconstructable membership history. Team size is capped at 100 to keep projections below DynamoDB item limits.
+Project/team records denormalize `memberIds` and `memberHandles` for authenticated management; public conversion removes owner ID, member IDs, and member handles. Relationship and audit records remain the reconstructable membership history. Team size is capped at 100 to keep projections below DynamoDB item limits.
 
 ## API contract summary
 
@@ -290,6 +294,7 @@ All protected routes require `Authorization: Bearer <access token>`. JSON succes
 Public reads:
 
 - `GET /health`
+- `GET /v1/directory/members`
 - `GET /v1/projects`
 - `GET /v1/projects/{id}`
 - `GET /v1/teams`
@@ -301,7 +306,11 @@ Member/profile routes:
 
 - `GET /v1/me`
 - `PATCH /v1/me`
+- `GET /v1/me/export`
+- `DELETE /v1/me`
+- `DELETE /v1/me/avatar`
 - `POST /v1/me/avatar-upload`
+- `POST /v1/me/avatar-upload/finalize`
 - `GET /v1/members?search=<handle-prefix>`
 - `PATCH /v1/members/{memberId}` for authorized role/status administration
 - `GET /v1/me/memberships`
@@ -317,7 +326,7 @@ Notification routes:
 Project and team resource routes support:
 
 - create, protected manage-read, update, and soft archive
-- owner/officer-authorized direct-to-S3 image upload initialization
+- owner/officer-authorized direct-to-S3 pending upload initialization and API finalization
 - create/withdraw/review join requests
 - list relationships by status
 - invite and revoke invitation
@@ -328,7 +337,7 @@ Project and team resource routes support:
 
 Project routes use `/v1/projects/{id}/...`; team routes mirror them at `/v1/teams/{id}/...`. Refer to `docs/api.md` before changing exact paths or bodies.
 
-Resource image routes are `POST /v1/projects/{id}/image-upload` and `POST /v1/teams/{id}/image-upload`. After the returned browser-to-S3 POST succeeds, the frontend patches `imageUrl` with the returned CloudFront `publicUrl`.
+Resource image initialization routes are `POST /v1/projects/{id}/image-upload`, `POST /v1/teams/{id}/image-upload`, and `POST /v1/events/{id}/image-upload`. After the browser-to-S3 pending POST succeeds, the frontend sends the returned `uploadId` to the matching `/image-upload/finalize` route; clients cannot patch a media URL directly.
 
 Management routes:
 
@@ -362,7 +371,7 @@ Error meanings:
 - SQS newsletter queue, dead-letter queue, redrive policy, and DLQ CloudWatch alarm.
 - SES configuration set with reputation metrics and bounce/complaint suppression.
 - Optional Cognito user pool/client and trigger Lambda when Cognito mode is selected.
-- Private S3 media bucket, CloudFront origin access control/distribution, browser upload CORS, security headers, and API write scope limited to avatar/project/team prefixes.
+- Private S3 media bucket, one-day pending-upload lifecycle, final-prefix-only CloudFront origin access, disabled avatar caching, browser upload CORS, security headers, and API write scope limited to represented pending/final prefixes.
 - Least-scope IAM roles/policies for the represented workloads.
 - CloudWatch log groups with bounded retention.
 - Optional monthly AWS Budget alert.

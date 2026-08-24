@@ -8,6 +8,7 @@ locals {
   }
   public_routes = toset([
     "GET /health",
+    "GET /v1/directory/members",
     "GET /v1/events",
     "GET /v1/events/{id}",
     "GET /v1/projects",
@@ -211,6 +212,25 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "media" {
   }
 }
 
+resource "aws_s3_bucket_lifecycle_configuration" "media" {
+  bucket = aws_s3_bucket.media.id
+
+  rule {
+    id     = "expire-abandoned-pending-uploads"
+    status = "Enabled"
+
+    filter {
+      prefix = "pending/"
+    }
+
+    expiration {
+      days = 1
+    }
+  }
+
+  depends_on = [aws_s3_bucket_ownership_controls.media]
+}
+
 resource "aws_s3_bucket_cors_configuration" "media" {
   bucket = aws_s3_bucket.media.id
 
@@ -255,6 +275,10 @@ data "aws_cloudfront_cache_policy" "optimized" {
   name = "Managed-CachingOptimized"
 }
 
+data "aws_cloudfront_cache_policy" "disabled" {
+  name = "Managed-CachingDisabled"
+}
+
 resource "aws_cloudfront_distribution" "media" {
   enabled         = true
   is_ipv6_enabled = true
@@ -278,6 +302,17 @@ resource "aws_cloudfront_distribution" "media" {
     response_headers_policy_id = aws_cloudfront_response_headers_policy.media.id
   }
 
+  ordered_cache_behavior {
+    path_pattern               = "avatars/*"
+    allowed_methods            = ["GET", "HEAD", "OPTIONS"]
+    cached_methods             = ["GET", "HEAD", "OPTIONS"]
+    target_origin_id           = "private-media-s3"
+    viewer_protocol_policy     = "redirect-to-https"
+    compress                   = true
+    cache_policy_id            = data.aws_cloudfront_cache_policy.disabled.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.media.id
+  }
+
   restrictions {
     geo_restriction {
       restriction_type = "none"
@@ -292,10 +327,15 @@ resource "aws_cloudfront_distribution" "media" {
 
 data "aws_iam_policy_document" "media_bucket" {
   statement {
-    sid       = "AllowCloudFrontReadOnly"
-    effect    = "Allow"
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.media.arn}/*"]
+    sid     = "AllowCloudFrontReadOnly"
+    effect  = "Allow"
+    actions = ["s3:GetObject"]
+    resources = [
+      "${aws_s3_bucket.media.arn}/avatars/*",
+      "${aws_s3_bucket.media.arn}/events/*",
+      "${aws_s3_bucket.media.arn}/projects/*",
+      "${aws_s3_bucket.media.arn}/teams/*",
+    ]
 
     principals {
       type        = "Service"
@@ -379,13 +419,30 @@ data "aws_iam_policy_document" "api" {
   }
 
   statement {
-    sid     = "CreateMediaUploads"
-    actions = ["s3:PutObject"]
+    sid     = "ManagePendingAndFinalMediaObjects"
+    actions = ["s3:DeleteObject", "s3:GetObject", "s3:PutObject"]
     resources = [
       "${aws_s3_bucket.media.arn}/avatars/*",
+      "${aws_s3_bucket.media.arn}/events/*",
+      "${aws_s3_bucket.media.arn}/pending/avatars/*",
+      "${aws_s3_bucket.media.arn}/pending/events/*",
+      "${aws_s3_bucket.media.arn}/pending/projects/*",
+      "${aws_s3_bucket.media.arn}/pending/teams/*",
       "${aws_s3_bucket.media.arn}/projects/*",
       "${aws_s3_bucket.media.arn}/teams/*",
     ]
+  }
+
+  statement {
+    sid       = "ListMemberAvatarMedia"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.media.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["avatars/*", "pending/avatars/*"]
+    }
   }
 
   statement {
@@ -416,6 +473,7 @@ data "aws_iam_policy_document" "newsletter_worker" {
   statement {
     sid = "ClubTableNewsletterReadWrite"
     actions = [
+      "dynamodb:DeleteItem",
       "dynamodb:GetItem",
       "dynamodb:PutItem",
       "dynamodb:Query",
