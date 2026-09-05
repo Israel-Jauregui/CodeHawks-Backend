@@ -139,6 +139,19 @@ const team: Team = {
 };
 
 describe('API', () => {
+  it('loads only the authenticated member RSVP and returns null when absent', async () => {
+    const getMemberEventRsvp = vi.fn().mockResolvedValueOnce({ status: 'going', memberId: owner.id }).mockResolvedValueOnce(undefined);
+    const repository = { ensureMember: vi.fn().mockResolvedValue(owner), getMemberEventRsvp } as unknown as ClubRepository;
+    const api = createApi({ config, repository });
+    const path = '/v1/events/22222222-2222-4222-8222-222222222222/rsvp';
+    const response = await api({ ...authenticatedEvent(path, 'GET'), queryStringParameters: { memberId: 'someone-else' } });
+    expect(response.statusCode).toBe(200);
+    expect(getMemberEventRsvp).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222', owner.id);
+    expect(JSON.parse((await api(authenticatedEvent(path, 'GET'))).body as string)).toEqual({ data: null });
+    expect((await api(event(path))).statusCode).toBe(401);
+    expect(getMemberEventRsvp).toHaveBeenCalledTimes(2);
+  });
+
   it('handles CORS preflight without touching DynamoDB or authentication', async () => {
     const ensureMember = vi.fn();
     const repository = { ensureMember } as unknown as ClubRepository;

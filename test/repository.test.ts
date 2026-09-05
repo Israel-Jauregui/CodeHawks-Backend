@@ -40,6 +40,37 @@ const project: Project = {
 };
 
 describe('DynamoClubRepository access patterns', () => {
+  it('prevents a deleted suspended identity from registering again', async () => {
+    let retainedIdentity: Record<string, unknown> | undefined;
+    const send = vi.fn().mockResolvedValueOnce({ Items: [] }).mockResolvedValueOnce({ Items: [] })
+      .mockImplementationOnce((command: { input: TransactWriteCommandInput }) => {
+        retainedIdentity = command.input.TransactItems?.[0]?.Put?.Item;
+        const deletion = command.input.TransactItems?.[3]?.Delete;
+        expect(deletion?.ConditionExpression).toContain('#status = :expectedStatus');
+        expect(deletion?.ExpressionAttributeValues?.[':expectedStatus']).toBe('suspended');
+        return Promise.resolve({});
+      }).mockImplementationOnce(() => Promise.resolve({ Item: retainedIdentity }));
+    const repository = new DynamoClubRepository('club-table', { send } as unknown as DynamoDBDocumentClient);
+    await repository.deleteMemberPersonalData({ ...member, status: 'suspended' });
+    await expect(repository.ensureMember({
+      provider: member.identityProvider, subject: member.identitySubject,
+      email: member.email, displayName: member.displayName, emailVerified: true,
+    })).rejects.toMatchObject({ statusCode: 403 });
+    expect(retainedIdentity).toEqual({
+      pk: `IDENTITY#${member.identityProvider}#${member.identitySubject}`,
+      sk: 'LOOKUP', entityType: 'SuspendedIdentity', suspended: true,
+    });
+    expect(send).toHaveBeenCalledTimes(4);
+  });
+
+  it('reads RSVP from the caller partition key, including legacy records without eventId', async () => {
+    const send = vi.fn().mockResolvedValue({ Item: { pk: 'EVENT#event', sk: 'MEMBER#member', memberId: 'member', status: 'maybe' } });
+    const repository = new DynamoClubRepository('club-table', { send } as unknown as DynamoDBDocumentClient);
+    await expect(repository.getMemberEventRsvp('event', 'member')).resolves.toEqual({ memberId: 'member', status: 'maybe' });
+    const command = send.mock.calls[0]?.[0] as { input: unknown };
+    expect(command.input).toMatchObject({ ConsistentRead: true, Key: { pk: 'EVENT#event', sk: 'MEMBER#member' } });
+  });
+
   it('creates a provider-neutral member UUID and private identity lookup atomically', async () => {
     const send = vi.fn().mockResolvedValueOnce({}).mockResolvedValueOnce({});
     const repository = new DynamoClubRepository(

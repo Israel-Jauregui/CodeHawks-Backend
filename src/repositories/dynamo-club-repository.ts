@@ -38,7 +38,7 @@ import type {
   TeamStatus,
 } from '../domain/entities.js';
 import { CURRENT_PRIVACY_POLICY_VERSION } from '../domain/entities.js';
-import { badRequest, conflict, notFound } from '../lib/errors.js';
+import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
 import type {
   ClubRepository,
   CreateEventInput,
@@ -472,6 +472,9 @@ export class DynamoClubRepository implements ClubRepository {
 
   public async ensureMember(identity: AuthenticatedIdentity): Promise<Member> {
     const identityLookup = await this.getRaw(identityKey(identity));
+    if (identityLookup?.suspended === true) {
+      throw forbidden('This school identity is suspended. Contact a club officer.');
+    }
     const existingMemberId =
       typeof identityLookup?.memberId === 'string' ? identityLookup.memberId : undefined;
     const existing = existingMemberId ? await this.getMember(existingMemberId) : undefined;
@@ -485,6 +488,7 @@ export class DynamoClubRepository implements ClubRepository {
       }
       const result = await this.documentClient.send(
         new UpdateCommand({
+          ConditionExpression: 'attribute_exists(pk)',
           ExpressionAttributeValues: {
             ':lastSeenAt': timestamp,
           },
@@ -591,7 +595,7 @@ export class DynamoClubRepository implements ClubRepository {
 
   public async getMember(memberId: string): Promise<Member | undefined> {
     const result = await this.documentClient.send(
-      new GetCommand({ Key: profileKey(memberId), TableName: this.tableName }),
+      new GetCommand({ ConsistentRead: true, Key: profileKey(memberId), TableName: this.tableName }),
     );
     const member = withoutStorageKeys<Member>(result.Item as Item | undefined);
     return member ? normalizeMember(member) : undefined;
@@ -986,7 +990,19 @@ export class DynamoClubRepository implements ClubRepository {
     await this.documentClient.send(
       new TransactWriteCommand({
         TransactItems: [
-          {
+          member.status === 'suspended' ? {
+            // Keep only the enforcement marker, not the deleted member's profile.
+            // Registration reads this same key before it can create a new account.
+            Put: {
+              Item: {
+                pk: `IDENTITY#${member.identityProvider}#${member.identitySubject}`,
+                sk: 'LOOKUP',
+                entityType: 'SuspendedIdentity',
+                suspended: true,
+              },
+              TableName: this.tableName,
+            },
+          } : {
             Delete: {
               Key: {
                 pk: `IDENTITY#${member.identityProvider}#${member.identitySubject}`,
@@ -1009,7 +1025,12 @@ export class DynamoClubRepository implements ClubRepository {
           },
           {
             Delete: {
-              ConditionExpression: 'attribute_exists(pk)',
+              ConditionExpression: '#status = :expectedStatus AND handle = :expectedHandle',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: {
+                ':expectedStatus': member.status,
+                ':expectedHandle': member.handle,
+              },
               Key: profileKey(member.id),
               TableName: this.tableName,
             },
@@ -1029,7 +1050,12 @@ export class DynamoClubRepository implements ClubRepository {
           },
         ],
       }),
-    );
+    ).catch((error: unknown) => {
+      if (isConditionalFailure(error)) {
+        throw conflict('Your account status or handle changed during deletion. Refresh and retry.');
+      }
+      throw error;
+    });
   }
 
   public async listMemberNotifications(
@@ -2166,6 +2192,12 @@ export class DynamoClubRepository implements ClubRepository {
     return this.listPartitionItems<EventRsvp>(key('EVENT', eventId), 'MEMBER#', limit, cursor);
   }
 
+  public async getMemberEventRsvp(eventId: string, memberId: string): Promise<EventRsvp | undefined> {
+    return withoutStorageKeys<EventRsvp>(await this.getRaw({
+      pk: key('EVENT', eventId), sk: key('MEMBER', memberId),
+    }));
+  }
+
   public async createNewsletter(
     actor: Member,
     input: CreateNewsletterInput,
@@ -2787,7 +2819,7 @@ export class DynamoClubRepository implements ClubRepository {
 
   private async getRaw(itemKey: Record<'pk' | 'sk', string>): Promise<Item | undefined> {
     const result = await this.documentClient.send(
-      new GetCommand({ Key: itemKey, TableName: this.tableName }),
+      new GetCommand({ ConsistentRead: true, Key: itemKey, TableName: this.tableName }),
     );
     return result.Item as Item | undefined;
   }

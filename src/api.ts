@@ -1134,6 +1134,9 @@ async function authenticatedRoutes(
     return noContent();
   }
   const rsvpMatch = pathMatch(path, /^\/v1\/events\/([0-9a-f-]+)\/rsvp$/i);
+  if (rsvpMatch?.[1] && method === 'GET') {
+    return json(200, { data: await repository.getMemberEventRsvp(rsvpMatch[1], actor.id) ?? null });
+  }
   if (rsvpMatch?.[1] && method === 'PUT') {
     const clubEvent = await requireEvent(repository, rsvpMatch[1]);
     if (clubEvent.archived || !clubEvent.published) {
