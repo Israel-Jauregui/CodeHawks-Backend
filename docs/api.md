@@ -268,3 +268,9 @@ See [email.md](email.md) for signup activation, SES prerequisites, retry behavio
 - `404`: route/resource missing or non-public resource requested publicly
 - `409`: stale membership/resource state, duplicate operation, archived/closed resource, or full team
 - `500`: unexpected error; internal detail remains in CloudWatch
+
+## Member RSVP lookup
+
+`GET /v1/events/{eventId}/rsvp` requires authentication and returns the caller's saved RSVP,
+or `data: null` if none exists. The member ID comes only from the authenticated profile.
+The lookup uses a strongly consistent base-table read, including for legacy RSVP records.

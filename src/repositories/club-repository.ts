@@ -114,6 +114,7 @@ export interface ClubRepository {
   setEventRsvp(event: ClubEvent, member: Member, status: 'going' | 'maybe'): Promise<void>;
   removeEventRsvp(event: ClubEvent, member: Member): Promise<void>;
   listEventRsvps(eventId: string, limit: number, cursor?: string): Promise<Page<EventRsvp>>;
+  getMemberEventRsvp(eventId: string, memberId: string): Promise<EventRsvp | undefined>;
 
   createNewsletter(actor: Member, input: CreateNewsletterInput): Promise<Newsletter>;
   getNewsletter(newsletterId: string): Promise<Newsletter | undefined>;

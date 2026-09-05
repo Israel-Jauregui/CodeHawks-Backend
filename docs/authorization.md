@@ -27,6 +27,7 @@ Additional rules:
 - A Vice President cannot modify a President account.
 - A user cannot suspend their own account.
 - A suspended user may read `/v1/me`, export `/v1/me/export`, and delete `/v1/me`, but cannot use other protected operations.
+- Deletion of a suspended account retains a minimal identity restriction. `ensureMember` rejects that identity before profile creation; deleting the profile does not lift a suspension. The final deletion transaction checks the current status and handle so a concurrent administrative change cannot silently remove the restriction.
 - Browser fields and token role/group claims are ignored. Only DynamoDB is authoritative.
 
 The first President is established once with AWS operator credentials after their first sign-in. Thereafter, the President assigns roles through the API.
